@@ -1,0 +1,3 @@
+ip,os_type,user
+10.0.0.1,linux,test_linux_user
+10.0.0.2,windows,test_win_user

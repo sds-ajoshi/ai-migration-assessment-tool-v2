@@ -1,0 +1,4 @@
+ip,os_type,user
+192.168.1.10,linux,linux_user
+192.168.1.11,windows,win_admin
+192.168.1.99,linux,linux_user

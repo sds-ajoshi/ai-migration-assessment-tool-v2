@@ -1,0 +1,15 @@
+# Core Application & CLI
+typer[all]==0.12.3
+rich==13.7.1
+
+# Data Handling
+pandas==2.2.2
+
+# Remote Execution
+paramiko==3.4.0
+pywinrm==0.4.1
+
+# Security & Secrets Management
+keyring==25.2.1
+
+setuptools<70
