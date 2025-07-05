@@ -1,0 +1,33 @@
+# Knowledge Base for the AI-Powered Migration Assessment Tool
+# Version: 1.0
+
+# This file contains configuration data that drives the tool's analysis.
+
+# --- Performance Counters Configuration ---
+# List of performance counters to be collected by the discovery agent.
+performance_counters:
+  windows:
+    - "\\Processor(_Total)\\% Processor Time"
+    - "\\Memory\\Available MBytes"
+    - "\\Memory\\Pages/sec"
+    - "\\LogicalDisk(*)\\% Free Space"
+    - "\\LogicalDisk(*)\\Avg. Disk sec/Read"
+    - "\\LogicalDisk(*)\\Avg. Disk sec/Write"
+    - "\\LogicalDisk(*)\\Current Disk Queue Length"
+    - "\\Network Interface(*)\\Bytes Total/sec"
+
+# --- Future Configurations ---
+# This section can be expanded in future sprints.
+#
+# scoring_rules:
+#   - metric: os_age
+#     threshold: 5 # years
+#     score_impact: -2
+#     reason: "Operating system is approaching end-of-life."
+#
+# cloud_instance_map:
+#   aws:
+#     - name: "t3.medium"
+#       vcpus: 2
+#       memory_gb: 4
+#       price_per_hour: 0.0416

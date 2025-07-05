@@ -13,3 +13,10 @@ pywinrm==0.4.1
 keyring==25.2.1
 
 setuptools<70
+
+# Graph Analysis
+networkx==3.3
+python-louvain==0.16
+
+# Graph Database Driver ---
+neo4j==5.20.0
