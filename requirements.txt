@@ -11,6 +11,7 @@ pywinrm==0.4.1
 
 # Security & Secrets Management
 keyring==25.2.1
+keyrings.alt==5.0.0 
 
 setuptools<70
 
@@ -18,5 +19,8 @@ setuptools<70
 networkx==3.3
 python-louvain==0.16
 
-# Graph Database Driver ---
+# Graph Database Driver
 neo4j==5.20.0
+
+# YAML Handling
+PyYAML==6.0.1

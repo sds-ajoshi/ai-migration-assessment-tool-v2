@@ -1,193 +1,110 @@
 import sqlite3
 from sqlite3 import Error
 import os
-from typing import List, Tuple
+from typing import List, Tuple, Dict
 
 DB_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'assessment_history.db')
 
 def create_connection():
-    """Create a database connection to the SQLite database."""
+    """Create a database connection to the SQLite database with a higher timeout."""
     conn = None
     try:
-        conn = sqlite3.connect(DB_FILE)
+        conn = sqlite3.connect(DB_FILE, timeout=10.0)
     except Error as e:
         print(f"Error connecting to database: {e}")
     return conn
 
 def create_tables(conn):
     """Create or check all necessary tables in the SQLite database."""
-    sql_create_servers_table = """
-    CREATE TABLE IF NOT EXISTS servers (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        hostname TEXT NOT NULL,
-        ip_address TEXT UNIQUE NOT NULL,
-        os_name TEXT,
-        os_version TEXT,
-        cpu_cores INTEGER,
-        total_memory_gb REAL,
-        discovery_timestamp DATETIME NOT NULL
-    );
-    """
-    sql_create_applications_table = """
-    CREATE TABLE IF NOT EXISTS applications (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        server_id INTEGER NOT NULL,
-        process_name TEXT NOT NULL,
-        pid INTEGER,
-        user TEXT,
-        state TEXT,
-        FOREIGN KEY (server_id) REFERENCES servers (id)
-    );
-    """
-    sql_create_performance_metrics_table = """
-    CREATE TABLE IF NOT EXISTS performance_metrics (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        server_id INTEGER NOT NULL,
-        metric_name TEXT NOT NULL,
-        metric_value REAL NOT NULL,
-        timestamp DATETIME NOT NULL,
-        FOREIGN KEY (server_id) REFERENCES servers (id)
-    );
-    """
-    sql_create_network_connections_table = """
-    CREATE TABLE IF NOT EXISTS network_connections (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        source_server_id INTEGER NOT NULL,
-        destination_ip TEXT NOT NULL,
-        destination_port INTEGER NOT NULL,
-        state TEXT,
-        process_name TEXT,
-        process_pid INTEGER,
-        FOREIGN KEY (source_server_id) REFERENCES servers (id)
-    );
-    """
-    try:
-        c = conn.cursor()
-        c.execute(sql_create_servers_table)
-        c.execute(sql_create_applications_table)
-        c.execute(sql_create_performance_metrics_table)
-        c.execute(sql_create_network_connections_table)
-        conn.commit()
-        print("[*] All tables checked/created successfully.")
-    except Error as e:
-        print(f"Error creating tables: {e}")
+    c = conn.cursor()
+    c.execute("CREATE TABLE IF NOT EXISTS servers (id INTEGER PRIMARY KEY, hostname TEXT NOT NULL, ip_address TEXT UNIQUE NOT NULL, os_name TEXT, os_version TEXT, cpu_cores INTEGER, total_memory_gb REAL, discovery_timestamp DATETIME NOT NULL);")
+    c.execute("CREATE TABLE IF NOT EXISTS applications (id INTEGER PRIMARY KEY, server_id INTEGER NOT NULL, process_name TEXT NOT NULL, pid INTEGER, user TEXT, state TEXT, FOREIGN KEY (server_id) REFERENCES servers (id));")
+    c.execute("CREATE TABLE IF NOT EXISTS performance_metrics (id INTEGER PRIMARY KEY, server_id INTEGER NOT NULL, metric_name TEXT NOT NULL, metric_value REAL NOT NULL, timestamp DATETIME NOT NULL, FOREIGN KEY (server_id) REFERENCES servers (id));")
+    c.execute("CREATE TABLE IF NOT EXISTS network_connections (id INTEGER PRIMARY KEY, source_server_id INTEGER NOT NULL, destination_ip TEXT NOT NULL, destination_port INTEGER NOT NULL, state TEXT, process_name TEXT, process_pid INTEGER, FOREIGN KEY (source_server_id) REFERENCES servers (id));")
+    c.execute("CREATE TABLE IF NOT EXISTS installed_software (id INTEGER PRIMARY KEY, server_id INTEGER NOT NULL, name TEXT NOT NULL, version TEXT, vendor TEXT, FOREIGN KEY (server_id) REFERENCES servers (id));")
+    c.execute("CREATE TABLE IF NOT EXISTS storage_mounts (id INTEGER PRIMARY KEY, server_id INTEGER NOT NULL, source TEXT NOT NULL, mount_point TEXT NOT NULL, filesystem_type TEXT, storage_type TEXT, total_gb REAL, used_gb REAL, FOREIGN KEY (server_id) REFERENCES servers (id));")
+    c.execute("CREATE TABLE IF NOT EXISTS configuration_files (id INTEGER PRIMARY KEY, server_id INTEGER NOT NULL, file_path TEXT NOT NULL, content TEXT, FOREIGN KEY (server_id) REFERENCES servers (id));")
+    c.execute("CREATE TABLE IF NOT EXISTS extracted_config_pairs (id INTEGER PRIMARY KEY, config_file_id INTEGER NOT NULL, key TEXT NOT NULL, value TEXT, FOREIGN KEY (config_file_id) REFERENCES configuration_files (id));")
+    c.execute("CREATE TABLE IF NOT EXISTS process_open_files (id INTEGER PRIMARY KEY, application_id INTEGER NOT NULL, file_path TEXT NOT NULL, FOREIGN KEY (application_id) REFERENCES applications (id));")
+    conn.commit()
+    print("[*] All tables checked/created successfully.")
 
-def add_server(conn, server_data: Tuple) -> int:
-    """
-    Add a new server to the servers table with all its details.
-    If the server IP exists, it returns the existing server's ID.
-    """
-    sql = '''
-    INSERT INTO servers(hostname, ip_address, os_name, os_version, cpu_cores, total_memory_gb, discovery_timestamp)
-    VALUES(?,?,?,?,?,?,?)
-    '''
-    cur = conn.cursor()
-    try:
-        cur.execute(sql, server_data)
-        conn.commit()
-        return cur.lastrowid
-    except sqlite3.IntegrityError:
-        # The server already exists, let's fetch its ID.
-        # We won't update it here, discovery runs are additive for connections/metrics.
-        # A new full run can be done by deleting the DB file.
-        cur.execute("SELECT id FROM servers WHERE ip_address = ?", (server_data[1],))
-        server_id = cur.fetchone()
-        if server_id:
-            return server_id[0]
-        return None # Should not happen if integrity error is for ip_address
+def add_servers_bulk(conn, server_list: List[Tuple]):
+    """Adds or updates a batch of servers using a more robust INSERT/UPDATE pattern."""
+    if not server_list: return
+    cursor = conn.cursor()
+    insert_sql = 'INSERT INTO servers(hostname, ip_address, os_name, os_version, cpu_cores, total_memory_gb, discovery_timestamp) VALUES(?,?,?,?,?,?,?)'
+    update_sql = 'UPDATE servers SET hostname=?, os_name=?, os_version=?, cpu_cores=?, total_memory_gb=?, discovery_timestamp=? WHERE ip_address=?'
+    for server_data in server_list:
+        ip_address = server_data[1]
+        cursor.execute("SELECT id FROM servers WHERE ip_address = ?", (ip_address,))
+        data = cursor.fetchone()
+        if data is None:
+            cursor.execute(insert_sql, server_data)
+        else:
+            update_data = (server_data[0], server_data[2], server_data[3], server_data[4], server_data[5], server_data[6], ip_address)
+            cursor.execute(update_sql, update_data)
+    conn.commit()
+    print(f"[*] Successfully upserted {len(server_list)} server records.")
 
-def add_network_connections(conn, connections_data: List[Tuple]):
-    """Add a batch of network connections to the network_connections table."""
-    if not connections_data:
-        return
+def add_applications_bulk(conn, app_list: List[Tuple]):
+    """Adds a batch of application processes."""
+    if not app_list: return
+    sql = 'INSERT INTO applications(server_id, process_name, pid, user, state) VALUES(?,?,?,?,?)'
+    conn.cursor().executemany(sql, app_list)
+    conn.commit()
+    print(f"[*] Successfully inserted {len(app_list)} application process records.")
+
+def add_performance_metrics_bulk(conn, metrics_data: List[Tuple]):
+    """Adds a batch of performance metrics."""
+    if not metrics_data: return
+    sql = 'INSERT INTO performance_metrics(server_id, metric_name, metric_value, timestamp) VALUES(?,?,?,?)'
+    conn.cursor().executemany(sql, metrics_data)
+    conn.commit()
+    print(f"[*] Successfully inserted {len(metrics_data)} performance metric records.")
+
+def add_network_connections_bulk(conn, connections_data: List[Tuple]):
+    """Adds a batch of network connections."""
+    if not connections_data: return
     sql = 'INSERT INTO network_connections(source_server_id, destination_ip, destination_port, state, process_name, process_pid) VALUES(?,?,?,?,?,?)'
-    cur = conn.cursor()
-    cur.executemany(sql, connections_data)
+    conn.cursor().executemany(sql, connections_data)
     conn.commit()
     print(f"[*] Successfully inserted {len(connections_data)} network connection records.")
 
-def add_server(conn, server_data: Tuple) -> int:
-    """
-    Add a new server to the servers table. If the server IP exists, return its ID.
-
-    Args:
-        conn (sqlite3.Connection): The SQLite connection object.
-        server_data (tuple): A tuple containing the server's data.
-
-    Returns:
-        int: The ID of the server row.
-    """
-    sql = '''
-    INSERT INTO servers(hostname, ip_address, os_name, os_version, cpu_cores, total_memory_gb, discovery_timestamp)
-    VALUES(?,?,?,?,?,?,?)
-    '''
-    cur = conn.cursor()
-    try:
-        cur.execute(sql, server_data)
-        conn.commit()
-        return cur.lastrowid
-    except sqlite3.IntegrityError:
-        print(f"[*] Server with IP {server_data[1]} already exists. Fetching ID.")
-        cur.execute("SELECT id FROM servers WHERE ip_address = ?", (server_data[1],))
-        return cur.fetchone()[0]
-
-def add_application_process(conn, app_data: Tuple) -> int:
-    """
-    Add a new application process to the applications table.
-
-    Args:
-        conn (sqlite3.Connection): The SQLite connection object.
-        app_data (tuple): A tuple containing the application's data.
-
-    Returns:
-        int: The ID of the newly inserted application row.
-    """
-    sql = '''
-    INSERT INTO applications(server_id, process_name, pid, user, state)
-    VALUES(?,?,?,?,?)
-    '''
-    cur = conn.cursor()
-    cur.execute(sql, app_data)
+def add_installed_software_bulk(conn, software_list: List[Tuple]):
+    """Adds a batch of installed software."""
+    if not software_list: return
+    sql = 'INSERT INTO installed_software(server_id, name, version, vendor) VALUES(?,?,?,?)'
+    conn.cursor().executemany(sql, software_list)
     conn.commit()
-    return cur.lastrowid
+    print(f"[*] Successfully inserted {len(software_list)} installed software records.")
 
-def add_performance_metrics(conn, metrics_data: List[Tuple]):
-    """
-    Add a batch of performance metrics to the performance_metrics table.
-    Uses executemany for efficient bulk insertion.
+def add_storage_mounts_bulk(conn, mounts_list: List[Tuple]):
+    """Adds a batch of storage mounts."""
+    if not mounts_list: return
+    sql = 'INSERT INTO storage_mounts(server_id, source, mount_point, filesystem_type, storage_type, total_gb, used_gb) VALUES(?,?,?,?,?,?,?)'
+    conn.cursor().executemany(sql, mounts_list)
+    conn.commit()
+    print(f"[*] Successfully inserted {len(mounts_list)} storage mount records.")
 
-    Args:
-        conn (sqlite3.Connection): The SQLite connection object.
-        metrics_data (List[Tuple]): A list of tuples, where each tuple contains:
-                                     (server_id, metric_name, metric_value, timestamp)
-    """
-    if not metrics_data:
-        return # Do nothing if there's no data
+def add_config_files_bulk(conn, files_list: List[Tuple]):
+    """Adds a batch of configuration files."""
+    if not files_list: return
+    sql = 'INSERT INTO configuration_files(server_id, file_path, content) VALUES(?,?,?)'
+    conn.cursor().executemany(sql, files_list)
+    conn.commit()
+    print(f"[*] Successfully inserted {len(files_list)} configuration file records.")
 
-    sql = '''
-    INSERT INTO performance_metrics(server_id, metric_name, metric_value, timestamp)
-    VALUES(?,?,?,?)
-    '''
-    cur = conn.cursor()
-    try:
-        cur.executemany(sql, metrics_data)
-        conn.commit()
-        print(f"[*] Successfully inserted {len(metrics_data)} performance metric records.")
-    except Error as e:
-        print(f"Error bulk inserting performance metrics: {e}")
+def add_open_files_bulk(conn, open_files_list: List[Tuple]):
+    """Adds a batch of open file records for processes."""
+    if not open_files_list: return
+    sql = 'INSERT INTO process_open_files(application_id, file_path) VALUES(?,?)'
+    conn.cursor().executemany(sql, open_files_list)
+    conn.commit()
+    print(f"[*] Successfully inserted {len(open_files_list)} open file records.")
 
-
-def main():
-    """Main function to initialize the database and create tables."""
-    print("--- Initializing Database ---")
-    conn = create_connection()
-
-    if conn is not None:
-        create_tables(conn)
-        conn.close()
-        print("--- Database Initialized Successfully ---")
-    else:
-        print("!!! Error! Cannot create the database connection.")
-
-if __name__ == '__main__':
-    main()
+def get_server_ips_to_ids(conn) -> Dict[str, int]:
+    """Fetches a mapping of all server IPs to their database IDs."""
+    cursor = conn.cursor()
+    cursor.execute("SELECT ip_address, id FROM servers")
+    return {row[0]: row[1] for row in cursor.fetchall()}

@@ -1,10 +1,34 @@
 # Knowledge Base for the AI-Powered Migration Assessment Tool
-# Version: 1.0
+# Version: 2.0
 
-# This file contains configuration data that drives the tool's analysis.
+# --- Configuration File Discovery Targets ---
+# The agent will search for files with these names and can optionally parse them.
+config_files:
+  - name: "httpd.conf"
+    paths: ["/etc/httpd", "/etc/apache2"] # Search in these specific directories
+    parsers:
+      - key: "ListenPort"
+        regex: "^Listen\\s+(\\d+)"
+      - key: "ServerAdmin"
+        regex: "^ServerAdmin\\s+(.+)"
+  
+  - name: "nginx.conf"
+    paths: ["/etc/nginx"]
+    parsers:
+      - key: "WorkerProcesses"
+        regex: "worker_processes\\s+(\\d+);"
 
+  - name: "my.cnf"
+    paths: ["/etc/mysql", "/etc"]
+    parsers:
+      - key: "Port"
+        regex: "^port\\s*=\\s*(\\d+)"
+        section: "mysqld" # Optional: only look for this key under the [mysqld] section
+
+  - name: "web.config" # For Windows
+    paths: ["C:\\inetpub\\wwwroot"]
+    # No parsers defined for XML yet, just content collection
 # --- Performance Counters Configuration ---
-# List of performance counters to be collected by the discovery agent.
 performance_counters:
   windows:
     - "\\Processor(_Total)\\% Processor Time"
@@ -15,19 +39,3 @@ performance_counters:
     - "\\LogicalDisk(*)\\Avg. Disk sec/Write"
     - "\\LogicalDisk(*)\\Current Disk Queue Length"
     - "\\Network Interface(*)\\Bytes Total/sec"
-
-# --- Future Configurations ---
-# This section can be expanded in future sprints.
-#
-# scoring_rules:
-#   - metric: os_age
-#     threshold: 5 # years
-#     score_impact: -2
-#     reason: "Operating system is approaching end-of-life."
-#
-# cloud_instance_map:
-#   aws:
-#     - name: "t3.medium"
-#       vcpus: 2
-#       memory_gb: 4
-#       price_per_hour: 0.0416

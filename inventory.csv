@@ -1,4 +1,5 @@
 ip,os_type,user
-192.168.1.10,linux,linux_user
-192.168.1.11,windows,win_admin
-192.168.1.99,linux,linux_user
+10.1.148.22,linux,dev
+10.1.148.23,linux,root
+10.1.148.90,linux,root
+10.1.148.91,linux,root
