@@ -1,11 +1,10 @@
 # Knowledge Base for the AI-Powered Migration Assessment Tool
-# Version: 2.0
+# Version: 2.1
 
 # --- Configuration File Discovery Targets ---
-# The agent will search for files with these names and can optionally parse them.
 config_files:
   - name: "httpd.conf"
-    paths: ["/etc/httpd", "/etc/apache2"] # Search in these specific directories
+    paths: ["/etc/httpd", "/etc/apache2"]
     parsers:
       - key: "ListenPort"
         regex: "^Listen\\s+(\\d+)"
@@ -23,19 +22,29 @@ config_files:
     parsers:
       - key: "Port"
         regex: "^port\\s*=\\s*(\\d+)"
-        section: "mysqld" # Optional: only look for this key under the [mysqld] section
+        section: "mysqld"
 
-  - name: "web.config" # For Windows
+  - name: "web.config"
     paths: ["C:\\inetpub\\wwwroot"]
-    # No parsers defined for XML yet, just content collection
+
 # --- Performance Counters Configuration ---
 performance_counters:
   windows:
-    - "\\Processor(_Total)\\% Processor Time"
+    # CPU
+    - "\\Processor Information(_Total)\\% Processor Time"
+    - "\\Processor Information(_Total)\\% User Time"
+    - "\\Processor Information(_Total)\\% Privileged Time"
+    # Memory
     - "\\Memory\\Available MBytes"
     - "\\Memory\\Pages/sec"
-    - "\\LogicalDisk(*)\\% Free Space"
+    - "\\Paging File(_Total)\\% Usage"
+    # Disk I/O
+    - "\\LogicalDisk(*)\\Disk Reads/sec"
+    - "\\LogicalDisk(*)\\Disk Writes/sec"
+    - "\\LogicalDisk(*)\\Disk Read Bytes/sec"
+    - "\\LogicalDisk(*)\\Disk Write Bytes/sec"
     - "\\LogicalDisk(*)\\Avg. Disk sec/Read"
     - "\\LogicalDisk(*)\\Avg. Disk sec/Write"
-    - "\\LogicalDisk(*)\\Current Disk Queue Length"
-    - "\\Network Interface(*)\\Bytes Total/sec"
+    # Network I/O
+    - "\\Network Interface(*)\\Bytes Received/sec"
+    - "\\Network Interface(*)\\Bytes Sent/sec"

@@ -112,48 +112,37 @@ def discover(
     
     server_id_map = db_manager.get_server_ips_to_ids(conn)
 
-    apps_to_add, connections_to_add, metrics_to_add, software_to_add, mounts_to_add, configs_to_add = [], [], [], [], [], []
     for res in successful_hosts:
         server_id = server_id_map.get(res['ip'])
         if not server_id: continue
+        
+        db_manager.clear_snapshot_data_for_server(conn, server_id)
+        
         data = res.get('data', {})
-        if data.get('running_processes'): apps_to_add.extend([(server_id, p.get('process_name'), p.get('pid'), p.get('user'), str(p.get('state'))) for p in data['running_processes']])
-        if data.get('network_connections'): connections_to_add.extend([(server_id, c['destination_ip'], c['destination_port'], c['state'], c['process_name'], c['process_pid']) for c in data['network_connections']])
-        if res.get('perf_data'): metrics_to_add.extend([(server_id, m['metric_name'], m['value'], m['timestamp']) for m in res['perf_data']])
-        if data.get('installed_software'): software_to_add.extend([(server_id, s.get('name'), s.get('version'), s.get('vendor')) for s in data['installed_software']])
-        if data.get('storage_mounts'): mounts_to_add.extend([(server_id, m.get('source'), m.get('mount_point'), m.get('filesystem_type'), m.get('storage_type'), m.get('total_gb'), m.get('used_gb')) for m in data['storage_mounts']])
-        if data.get('config_files'): configs_to_add.extend([(server_id, f.get('file_path'), f.get('content')) for f in data['config_files']])
+        apps_to_add = [(server_id, p.get('process_name'), p.get('pid'), p.get('user'), str(p.get('state')), p.get('command_line')) for p in data.get('running_processes', [])]
+        connections_to_add = [(server_id, c['destination_ip'], c['destination_port'], c['state'], c['process_name'], c['process_pid']) for c in data.get('network_connections', [])]
+        software_to_add = [(server_id, s.get('name'), s.get('version'), s.get('vendor')) for s in data.get('installed_software', [])]
+        mounts_to_add = [(server_id, m.get('source'), m.get('mount_point'), m.get('filesystem_type'), m.get('storage_type'), m.get('total_gb'), m.get('used_gb')) for m in data.get('storage_mounts', [])]
+        configs_to_add = [(server_id, f.get('file_path'), f.get('content')) for f in data.get('config_files', [])]
+        tasks_to_add = [(server_id, t.get('name'), t.get('command'), t.get('schedule'), t.get('enabled')) for t in data.get('scheduled_tasks', [])]
+        
+        db_manager.add_applications_bulk(conn, apps_to_add)
+        db_manager.add_network_connections_bulk(conn, connections_to_add)
+        db_manager.add_installed_software_bulk(conn, software_to_add)
+        db_manager.add_storage_mounts_bulk(conn, mounts_to_add)
+        db_manager.add_config_files_bulk(conn, configs_to_add)
+        db_manager.add_scheduled_tasks_bulk(conn, tasks_to_add)
 
-    db_manager.add_applications_bulk(conn, apps_to_add)
-    db_manager.add_network_connections_bulk(conn, connections_to_add)
-    db_manager.add_performance_metrics_bulk(conn, metrics_to_add)
-    db_manager.add_installed_software_bulk(conn, software_to_add)
-    # --- BUG FIX STARTS HERE ---
-    db_manager.add_storage_mounts_bulk(conn, mounts_to_add)
-    db_manager.add_config_files_bulk(conn, configs_to_add)
+        if res.get('perf_data'):
+            metrics_to_add = [(server_id, m['metric_name'], m['value'], m['timestamp']) for m in res['perf_data']]
+            db_manager.add_performance_metrics_bulk(conn, metrics_to_add)
 
-    open_files_to_add = []
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, server_id, pid FROM applications")
-    app_id_map = {(row[1], row[2]): row[0] for row in cursor.fetchall()}
-
-    for res in successful_hosts:
-        server_id = server_id_map.get(res['ip'])
-        if not server_id: continue
-        data = res.get('data', {})
-        if data.get('running_processes'):
-            for proc in data['running_processes']:
-                app_db_id = app_id_map.get((server_id, proc.get('pid')))
-                if app_db_id and proc.get('open_files'):
-                    open_files_to_add.extend([(app_db_id, f) for f in proc['open_files']])
-    db_manager.add_open_files_bulk(conn, open_files_to_add)
-    # --- BUG FIX ENDS HERE ---
-    
     console.rule("[bold cyan]Phase 2: Data Correlation & Analysis[/bold cyan]")
     agent_profiling.correlate_data(conn)
     
     dependency_graph = agent_profiling.build_dependency_graph(conn)
-    application_clusters = agent_profiling.find_application_clusters(dependency_graph)
+    resolved_graph = agent_profiling.resolve_service_names(dependency_graph)
+    application_clusters = agent_profiling.find_application_clusters(resolved_graph)
     
     cluster_table = Table(show_header=True, header_style="bold magenta", title="Discovered Application Clusters")
     cluster_table.add_column("Cluster ID", style="cyan", width=12)
@@ -164,17 +153,56 @@ def discover(
             cluster_table.add_row(f"Cluster-{i+1}", ", ".join(sorted(members)))
     console.print(cluster_table)
 
-    external_endpoints = agent_profiling.get_external_endpoints(dependency_graph)
+    external_endpoints = agent_profiling.get_external_endpoints(resolved_graph)
     external_table = Table(show_header=True, header_style="bold magenta", title="Discovered External Endpoints")
     external_table.add_column("External Endpoint (IP:Port)", style="yellow")
+    external_table.add_column("Service Name")
     external_table.add_column("Connected Internal Servers")
-    if not external_endpoints: external_table.add_row("N/A", "No external service connections were identified.")
+    if not external_endpoints: external_table.add_row("N/A", "N/A", "No external service connections were identified.")
     else:
         for endpoint, data in sorted(external_endpoints.items()):
-            external_table.add_row(endpoint, ", ".join(sorted(data['connected_servers'])))
+            service_name = data.get('service_name', 'unknown')
+            external_table.add_row(endpoint, service_name, ", ".join(sorted(data['connected_servers'])))
     console.print(external_table)
 
     console.rule("[bold blue]Phase 2.1: Deep Discovery Summary[/bold blue]")
+    
+    # --- Performance Summary Report ---
+    if perf_duration_minutes > 0:
+        perf_summary_table = Table(show_header=True, header_style="bold magenta", title="Performance Baseline Summary")
+        perf_summary_table.add_column("Server IP", style="cyan")
+        perf_summary_table.add_column("Metric Category", style="green")
+        perf_summary_table.add_column("Avg Utilization")
+        perf_summary_table.add_column("Max Utilization")
+        
+        cursor = conn.cursor()
+        # This query now groups metrics into categories and calculates AVG/MAX
+        query = """
+        SELECT
+            s.ip_address,
+            CASE
+                WHEN p.metric_name LIKE '%cpu_percent_utilization%' THEN 'CPU Utilization (%)'
+                WHEN p.metric_name LIKE '%memory_percent_used%' THEN 'Memory Utilization (%)'
+                WHEN p.metric_name LIKE '%disk_iops%' THEN 'Disk IOPS (Total)'
+                WHEN p.metric_name LIKE '%network_throughput%' THEN 'Network Throughput (Mbps)'
+                ELSE 'Other'
+            END as metric_category,
+            AVG(p.metric_value),
+            MAX(p.metric_value)
+        FROM performance_metrics p
+        JOIN servers s ON p.server_id = s.id
+        GROUP BY s.ip_address, metric_category
+        HAVING metric_category != 'Other'
+        ORDER BY s.ip_address, metric_category;
+        """
+        cursor.execute(query)
+        perf_rows = cursor.fetchall()
+        if not perf_rows:
+            perf_summary_table.add_row("N/A", "No performance metrics were collected.", "N/A", "N/A")
+        else:
+            for row in perf_rows:
+                perf_summary_table.add_row(str(row[0]), str(row[1]), f"{row[2]:.2f}", f"{row[3]:.2f}")
+        console.print(perf_summary_table)
     
     storage_table = Table(show_header=True, header_style="bold magenta", title="Discovered Storage Mounts")
     storage_table.add_column("Server IP", style="cyan")
@@ -211,11 +239,11 @@ def discover(
     
     if export_to_neo4j:
         console.rule("[bold magenta]Phase 2.5: Exporting to Neo4j[/bold magenta]")
-        if dependency_graph.number_of_nodes() > 0:
+        if resolved_graph.number_of_nodes() > 0:
             neo4j_driver = None
             try:
                 neo4j_driver = neo4j_manager.get_neo4j_driver()
-                if neo4j_driver: agent_profiling.export_graph_to_neo4j(dependency_graph, neo4j_driver)
+                if neo4j_driver: agent_profiling.export_graph_to_neo4j(resolved_graph, neo4j_driver)
             finally:
                 if neo4j_driver: neo4j_manager.close_driver(neo4j_driver)
         else:

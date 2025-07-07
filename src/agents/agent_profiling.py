@@ -90,7 +90,7 @@ def export_graph_to_neo4j(graph: nx.DiGraph, driver: Driver):
 
         server_nodes = [{"ip": n} for n, d in graph.nodes(data=True) if d.get('type') == 'server']
         external_nodes = [{"ip": n} for n, d in graph.nodes(data=True) if d.get('type') == 'external']
-        edges_to_create = [{"source": source, "dest": dest, "port": data.get('port')} for source, dest, data in graph.edges(data=True)]
+        edges_to_create = [{"source": source, "dest": dest, "port": data.get('port'), "service_name": data.get('service_name')} for source, dest, data in graph.edges(data=True)]
 
         if server_nodes:
             session.execute_write(lambda tx, data: tx.run("UNWIND $data AS node_data MERGE (s:Server {ip_address: node_data.ip})", data=data))
@@ -99,7 +99,15 @@ def export_graph_to_neo4j(graph: nx.DiGraph, driver: Driver):
             session.execute_write(lambda tx, data: tx.run("UNWIND $data AS node_data MERGE (e:ExternalService {ip_address: node_data.ip})", data=data))
             print(f"  [*] Merged {len(external_nodes)} ExternalService nodes into Neo4j.")
         if edges_to_create:
-            session.execute_write(lambda tx, data: tx.run("UNWIND $data AS edge_data MATCH (a:Server {ip_address: edge_data.source}) MATCH (b {ip_address: edge_data.dest}) MERGE (a)-[r:CONNECTS_TO {port: edge_data.port}]->(b)", data=data))
+            # Modified to include service_name property
+            query = """
+            UNWIND $edges AS edge_data
+            MATCH (a:Server {ip_address: edge_data.source})
+            MATCH (b {ip_address: edge_data.dest})
+            MERGE (a)-[r:CONNECTS_TO {port: edge_data.port}]->(b)
+            SET r.service_name = edge_data.service_name
+            """
+            session.execute_write(lambda tx, data: tx.run(query, data=data))
             print(f"  [*] Merged {len(edges_to_create)} relationships into Neo4j.")
     print("[*] Graph export to Neo4j complete.")
 
@@ -149,3 +157,50 @@ def correlate_data(conn):
         conn.commit()
     else:
         print("  [*] No direct correlations found between running processes and discovered config files.")
+
+def resolve_service_names(graph: nx.DiGraph) -> nx.DiGraph:
+    """
+    Iterates through graph edges and adds a 'service_name' attribute for well-known ports.
+    This fulfills Task 3.1 for Sprint 7.
+    """
+    print("\n[*] Resolving well-known port numbers to service names...")
+    
+    # A local dictionary of common enterprise ports. This could be expanded.
+    well_known_ports = {
+        21: "ftp", 22: "ssh", 25: "smtp", 53: "dns", 80: "http", 110: "pop3",
+        143: "imap", 443: "https", 445: "smb", 993: "imaps", 995: "pop3s",
+        1433: "ms-sql-s", 1521: "oracle", 3306: "mysql", 3389: "rdp",
+        5432: "postgresql", 5900: "vnc", 5985: "winrm-http", 5986: "winrm-https",
+        8080: "http-alt", 8443: "https-alt"
+    }
+    
+    resolved_count = 0
+    for u, v, data in graph.edges(data=True):
+        port = data.get('port')
+        if port in well_known_ports:
+            graph.edges[u, v]['service_name'] = well_known_ports[port]
+            resolved_count += 1
+            
+    print(f"  [*] Resolved {resolved_count} connections to known services.")
+    return graph
+
+# Example usage for standalone testing
+if __name__ == '__main__':
+    TEST_DB_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'assessment_history.db')
+    if not os.path.exists(TEST_DB_FILE):
+        print(f"Error: Database file not found at {TEST_DB_FILE}.")
+    else:
+        conn = sqlite3.connect(TEST_DB_FILE)
+        dependency_graph = build_dependency_graph(conn)
+        conn.close()
+        
+        # --- NEW: Test Service Name Resolution ---
+        resolved_graph = resolve_service_names(dependency_graph)
+
+        print("\n--- Graph Edges with Resolved Services ---")
+        for edge in resolved_graph.edges(data=True):
+            service_name = edge[2].get('service_name')
+            if service_name:
+                print(f"  {edge[0]} -> {edge[1]} (port: {edge[2].get('port')}, service: [bold green]{service_name}[/bold green])")
+            else:
+                print(f"  {edge[0]} -> {edge[1]} (port: {edge[2].get('port')})")

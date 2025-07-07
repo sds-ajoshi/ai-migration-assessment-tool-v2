@@ -28,131 +28,26 @@ def execute_ps_command(winrm_session, command):
     except Exception as e:
         return None, str(e)
 
-# --- Universal Software Inventory Discovery ---
+def _parse_proc_stat(stdout: str) -> Dict:
+    """Helper to parse the first line of /proc/stat."""
+    if not stdout: return {}
+    parts = stdout.splitlines()[0].split()
+    cpu_times = [int(p) for p in parts[1:]]
+    return {'user': cpu_times[0], 'nice': cpu_times[1], 'system': cpu_times[2], 'idle': cpu_times[3], 'iowait': cpu_times[4], 'total': sum(cpu_times)}
 
-def discover_installed_software_linux(ssh_client):
-    """
-    Discovers installed software on a Linux/Unix host using a multi-step fallback process.
-    """
-    print("  [*] Discovering installed software (Linux/Unix)...")
-    software_list = []
-    
-    # 1. Try DPKG (Debian, Ubuntu)
-    stdout, _ = execute_ssh_command(ssh_client, "command -v dpkg-query")
-    if stdout:
-        print("    [-] Found DPKG package manager.")
-        cmd = "dpkg-query -W -f='${Package}\\t${Version}\\t${Maintainer}\\n'"
-        stdout, _ = execute_ssh_command(ssh_client, cmd)
-        for line in stdout.strip().splitlines():
-            parts = line.split('\t')
-            if len(parts) == 3:
-                software_list.append({"name": parts[0], "version": parts[1], "vendor": parts[2]})
-        return software_list
-
-    # 2. Try RPM (CentOS, RHEL, Fedora)
-    stdout, _ = execute_ssh_command(ssh_client, "command -v rpm")
-    if stdout:
-        print("    [-] Found RPM package manager.")
-        cmd = "rpm -qa --queryformat '%{NAME}\\t%{VERSION}-%{RELEASE}\\t%{VENDOR}\\n'"
-        stdout, _ = execute_ssh_command(ssh_client, cmd)
-        for line in stdout.strip().splitlines():
-            parts = line.split('\t')
-            if len(parts) == 3:
-                software_list.append({"name": parts[0], "version": parts[1], "vendor": parts[2]})
-        return software_list
-
-    # 3. Try pkginfo (Solaris)
-    stdout, _ = execute_ssh_command(ssh_client, "command -v pkginfo")
-    if stdout:
-        print("    [-] Found pkginfo package manager (Solaris).")
-        cmd = "pkginfo -l"
-        stdout, _ = execute_ssh_command(ssh_client, cmd)
-        # Solaris pkginfo -l parsing is complex and stateful, requires more specific logic
-        # For now, we acknowledge detection but defer full implementation.
-        print("    [!] Solaris pkginfo parsing is not yet fully implemented.")
-        return software_list
-
-    # 4. Try lslpp (AIX)
-    stdout, _ = execute_ssh_command(ssh_client, "command -v lslpp")
-    if stdout:
-        print("    [-] Found lslpp package manager (AIX).")
-        cmd = "lslpp -L -c"
-        stdout, _ = execute_ssh_command(ssh_client, cmd)
-        # AIX lslpp parsing
-        print("    [!] AIX lslpp parsing is not yet fully implemented.")
-        return software_list
-
-    # 5. Fallback: Scan PATH
-    print("    [-] No known package manager found. Falling back to PATH scan (best-effort).")
-    # This is a very basic fallback and can be expanded
-    cmd = "ls -F /usr/bin/ /bin/ /usr/sbin/ /sbin/"
-    stdout, _ = execute_ssh_command(ssh_client, cmd)
+def _parse_diskstats(stdout: str) -> Dict:
+    """Helper to parse /proc/diskstats."""
+    stats = {}
     for line in stdout.splitlines():
-        if line.endswith('*') and not line.endswith('/'):
-            software_list.append({"name": line.strip('*'), "version": "N/A (Executable)", "vendor": "N/A"})
-    
-    return software_list
-
-def discover_config_files(ssh_client, config_targets: List[Dict]):
-    """
-    Finds, downloads, and parses configuration files based on targets
-    defined in the knowledge base.
-    """
-    print("  [*] Discovering application configuration files...")
-    discovered_files = []
-    
-    if not config_targets:
-        return discovered_files
-
-    for target in config_targets:
-        target_name = target.get("name")
-        search_paths = " ".join(target.get("paths", ["/etc"]))
-        
-        # 1. Find the file(s)
-        find_cmd = f"find {search_paths} -name {target_name} -type f 2>/dev/null"
-        found_paths_str, err = execute_ssh_command(ssh_client, find_cmd)
-        if err:
+        parts = line.split()
+        device_name = parts[2]
+        if not device_name.isalpha() and not (device_name[-1].isdigit() or device_name.startswith('nvme')):
             continue
-
-        for file_path in found_paths_str.strip().splitlines():
-            print(f"    [-] Found potential config file: {file_path}")
-            content = ""
-            
-            # 2. Try to read the file normally
-            cat_cmd = f"cat {file_path}"
-            content, cat_err = execute_ssh_command(ssh_client, cat_cmd)
-            
-            # 3. If permission denied, try with sudo
-            if "Permission denied" in cat_err:
-                print(f"    [!] Permission denied for {file_path}. Trying with sudo...")
-                sudo_cat_cmd = f"sudo cat {file_path}"
-                content, sudo_err = execute_ssh_command(ssh_client, sudo_cat_cmd)
-                if sudo_err:
-                    print(f"    [-] Failed to read with sudo: {sudo_err.strip()}")
-                    content = f"Error: Could not read file. Sudo failed: {sudo_err.strip()}"
-
-            # 4. Parse the content if parsers are defined
-            extracted_pairs = []
-            if "parsers" in target and content:
-                for parser in target["parsers"]:
-                    try:
-                        # Simple regex for now, can be expanded for section-based parsing
-                        match = re.search(parser["regex"], content, re.MULTILINE)
-                        if match:
-                            extracted_pairs.append({
-                                "key": parser["key"],
-                                "value": match.group(1).strip()
-                            })
-                    except re.error as e:
-                        print(f"    [-] Invalid regex for key '{parser['key']}': {e}")
-            
-            discovered_files.append({
-                "file_path": file_path,
-                "content": content, # For now, we store the full content
-                "extracted_pairs": extracted_pairs
-            })
-
-    return discovered_files
+        stats[device_name] = {
+            'reads_completed': int(parts[3]), 'writes_completed': int(parts[7]),
+            'sectors_read': int(parts[5]), 'sectors_written': int(parts[9])
+        }
+    return stats
 
 def discover_linux_hw(ssh_client, username):
     """Discovers hardware details from a Linux host."""
@@ -168,7 +63,10 @@ def discover_linux_hw(ssh_client, username):
     return hw_details
 
 def discover_linux_sw(ssh_client):
-    """Discovers software details from a Linux host."""
+    """
+    Discovers software and process details from a Linux host, with robust
+    process name parsing.
+    """
     sw_details = {}
     print("  [*] Discovering Linux Software...")
     stdout, _ = execute_ssh_command(ssh_client, "hostname")
@@ -177,12 +75,33 @@ def discover_linux_sw(ssh_client):
     for line in stdout.splitlines():
         if line.startswith("PRETTY_NAME="): sw_details['os_name'] = line.split('=')[1].strip().strip('"')
         elif line.startswith("VERSION_ID="): sw_details['os_version'] = line.split('=')[1].strip().strip('"')
-    stdout, _ = execute_ssh_command(ssh_client, "ps -eo user,pid,stat,comm --no-headers")
+    
+    stdout, _ = execute_ssh_command(ssh_client, "ps -eo pid,user,stat,args --no-headers")
     processes = []
     for line in stdout.strip().splitlines():
-        parts = line.split(maxsplit=3)
+        parts = line.split(None, 3)
         if len(parts) == 4:
-            processes.append({'user': parts[0], 'pid': int(parts[1]), 'state': parts[2], 'process_name': parts[3].strip()})
+            pid, user, state, command_line = parts
+            
+            # --- ROBUST PARSING LOGIC ---
+            process_name = ""
+            cmd_str = command_line.strip()
+            # Handle kernel threads enclosed in brackets
+            if cmd_str.startswith('[') and cmd_str.endswith(']'):
+                process_name = cmd_str[1:-1]
+            else:
+                # The process name is the first part of the command line before any spaces
+                executable_path = cmd_str.split()[0]
+                # The name is the part after the last slash
+                process_name = executable_path.split('/')[-1]
+            
+            processes.append({
+                'pid': int(pid),
+                'user': user,
+                'state': state,
+                'process_name': process_name,
+                'command_line': cmd_str
+            })
     sw_details['running_processes'] = processes
     return sw_details
 
@@ -201,24 +120,142 @@ def discover_linux_network(ssh_client):
             connections.append({"destination_ip": dest_ip, "destination_port": int(dest_port), "state": state, "process_name": process_name, "process_pid": int(pid)})
     return connections
 
-def _parse_proc_stat(stdout: str) -> Dict:
-    """Helper to parse the first line of /proc/stat."""
-    parts = stdout.splitlines()[0].split()
-    cpu_times = [int(p) for p in parts[1:]]
-    return {'user': cpu_times[0], 'nice': cpu_times[1], 'system': cpu_times[2], 'idle': cpu_times[3], 'iowait': cpu_times[4], 'total': sum(cpu_times)}
+def discover_installed_software_linux(ssh_client):
+    """Discovers installed software on a Linux/Unix host using a multi-step fallback process."""
+    print("  [*] Discovering installed software (Linux/Unix)...")
+    software_list = []
+    stdout, _ = execute_ssh_command(ssh_client, "command -v dpkg-query")
+    if stdout:
+        print("    [-] Found DPKG package manager.")
+        cmd = "dpkg-query -W -f='${Package}\\t${Version}\\t${Maintainer}\\n'"
+        stdout, _ = execute_ssh_command(ssh_client, cmd)
+        for line in stdout.strip().splitlines():
+            parts = line.split('\t')
+            if len(parts) == 3: software_list.append({"name": parts[0], "version": parts[1], "vendor": parts[2]})
+        return software_list
+    stdout, _ = execute_ssh_command(ssh_client, "command -v rpm")
+    if stdout:
+        print("    [-] Found RPM package manager.")
+        cmd = "rpm -qa --queryformat '%{NAME}\\t%{VERSION}-%{RELEASE}\\t%{VENDOR}\\n'"
+        stdout, _ = execute_ssh_command(ssh_client, cmd)
+        for line in stdout.strip().splitlines():
+            parts = line.split('\t')
+            if len(parts) == 3: software_list.append({"name": parts[0], "version": parts[1], "vendor": parts[2]})
+        return software_list
+    return software_list
+
+def discover_config_files(ssh_client, config_targets: List[Dict]):
+    """Finds, downloads, and parses configuration files based on targets."""
+    print("  [*] Discovering application configuration files...")
+    discovered_files = []
+    if not config_targets: return discovered_files
+    for target in config_targets:
+        target_name = target.get("name")
+        search_paths = " ".join(target.get("paths", ["/etc"]))
+        find_cmd = f"find {search_paths} -name {target_name} -type f 2>/dev/null"
+        found_paths_str, _ = execute_ssh_command(ssh_client, find_cmd)
+        for file_path in found_paths_str.strip().splitlines():
+            print(f"    [-] Found potential config file: {file_path}")
+            content, cat_err = execute_ssh_command(ssh_client, f"cat {file_path}")
+            if "Permission denied" in cat_err:
+                print(f"    [!] Permission denied for {file_path}. Trying with sudo...")
+                content, sudo_err = execute_ssh_command(ssh_client, f"sudo cat {file_path}")
+                if sudo_err: content = f"Error: Could not read file. Sudo failed: {sudo_err.strip()}"
+            discovered_files.append({"file_path": file_path, "content": content})
+    return discovered_files
+
+def discover_storage_mounts_linux(ssh_client):
+    """
+    Discovers all storage mounts on a Linux host, identifying DAS, NAS, and SAN.
+    Refactored to be more robust and compatible with older systems.
+    """
+    print("  [*] Discovering storage mounts (Linux)...")
+    mounts = []
+    san_devices = set()
+    stdout, _ = execute_ssh_command(ssh_client, "command -v multipath")
+    if stdout:
+        print("    [-] Found multipath tools, checking for SAN LUNs...")
+        mp_stdout, _ = execute_ssh_command(ssh_client, "multipath -ll")
+        for line in mp_stdout.splitlines():
+            match = re.search(r'\((\w+)\)\s+dm-\d+', line)
+            if match: san_devices.add(f"/dev/mapper/{match.group(1)}")
+
+    # --- REFINED LOGIC ---
+    # 1. Try modern `df --output` command first
+    df_cmd = "df --output=source,fstype,size,used,target"
+    df_stdout, df_stderr = execute_ssh_command(ssh_client, df_cmd)
+
+    # 2. If modern command fails, fall back to legacy command
+    if "invalid option" in df_stderr or "unrecognized option" in df_stderr:
+        print("    [!] 'df --output' not supported. Falling back to 'df -PT'.")
+        df_cmd_fallback = "df -PT"
+        df_stdout, df_stderr = execute_ssh_command(ssh_client, df_cmd_fallback)
+
+        if df_stderr:
+            print(f"    [-] Error running fallback df command: {df_stderr}")
+            return mounts
+
+        # Parse legacy 'df -PT' output
+        for line in df_stdout.strip().splitlines()[1:]:
+            parts = line.split()
+            if len(parts) < 7: continue
+            source, fs_type, total_kb, used_kb, _, _, mount_point = parts[0], parts[1], parts[2], parts[3], parts[4], parts[5], " ".join(parts[6:])
+            storage_type = "DAS"
+            if fs_type.startswith("nfs") or fs_type == "cifs": storage_type = "NAS"
+            elif source in san_devices: storage_type = "SAN"
+            try:
+                mounts.append({"source": source, "mount_point": mount_point, "filesystem_type": fs_type, "storage_type": storage_type, "total_gb": round(int(total_kb) / 1024, 2), "used_gb": round(int(used_kb) / 1024, 2)}) # Note: df -T reports in 1K-blocks
+            except ValueError: continue
+    
+    elif df_stderr:
+        print(f"    [-] Error running df command: {df_stderr}")
+        return mounts
+
+    else:
+        # Parse modern 'df --output' output
+        for line in df_stdout.strip().splitlines()[1:]:
+            parts = line.split(maxsplit=4)
+            if len(parts) < 5: continue
+            source, fs_type, total_kb, used_kb, mount_point = parts
+            storage_type = "DAS"
+            if fs_type.startswith("nfs") or fs_type == "cifs": storage_type = "NAS"
+            elif source in san_devices: storage_type = "SAN"
+            try:
+                mounts.append({"source": source, "mount_point": mount_point, "filesystem_type": fs_type, "storage_type": storage_type, "total_gb": round(int(total_kb) / (1024*1024), 2), "used_gb": round(int(used_kb) / (1024*1024), 2)})
+            except ValueError: continue
+            
+    return mounts
+
+def discover_process_open_files(ssh_client, pids: List[int]):
+    """For a given list of Process IDs, find all open files using lsof."""
+    if not pids: return {}
+    print("  [*] Discovering open files for running processes...")
+    pid_str = ",".join(map(str, pids))
+    command = f"lsof -p {pid_str} -n -P | awk '{{print $2, $9}}'"
+    stdout, _ = execute_ssh_command(ssh_client, command)
+    open_files_map = defaultdict(list)
+    for line in stdout.strip().splitlines():
+        try:
+            pid, file_path = line.split(maxsplit=1)
+            if file_path.startswith('/'):
+                open_files_map[int(pid)].append(file_path)
+        except ValueError: continue
+    return open_files_map
 
 def _collect_perf_from_proc(ssh_client, duration_minutes, interval_seconds):
     """Fallback performance collection method using the /proc filesystem."""
     print("  [*] 'sysstat' not found. Using fallback performance collection from /proc.")
     all_metrics = []
     end_time = datetime.now() + timedelta(minutes=duration_minutes)
-    stdout, _ = execute_ssh_command(ssh_client, "cat /proc/stat")
-    if not stdout: return []
-    last_cpu_stats = _parse_proc_stat(stdout)
-
+    stdout_stat, _ = execute_ssh_command(ssh_client, "cat /proc/stat")
+    stdout_disk, _ = execute_ssh_command(ssh_client, "cat /proc/diskstats")
+    if not stdout_stat or not stdout_disk: return []
+    last_cpu_stats = _parse_proc_stat(stdout_stat)
+    last_disk_stats = _parse_diskstats(stdout_disk)
     while datetime.now() < end_time:
         collection_timestamp = datetime.now()
-        print(f"  [*] Collecting /proc data point at {collection_timestamp.strftime('%H:%M:%S')}...")
+        # print(f"  [*] Collecting /proc data point at {collection_timestamp.strftime('%H:%M:%S')}...")
+        # CPU
         stdout, _ = execute_ssh_command(ssh_client, "cat /proc/stat")
         if stdout:
             current_cpu_stats = _parse_proc_stat(stdout)
@@ -228,6 +265,7 @@ def _collect_perf_from_proc(ssh_client, duration_minutes, interval_seconds):
                 cpu_util = 100.0 * (1.0 - (delta_idle / delta_total))
                 all_metrics.append({'metric_name': 'cpu_percent_utilization', 'value': round(cpu_util, 2), 'timestamp': collection_timestamp})
             last_cpu_stats = current_cpu_stats
+        # Memory
         stdout, _ = execute_ssh_command(ssh_client, "cat /proc/meminfo")
         if stdout:
             mem_total = mem_available = 0
@@ -235,8 +273,26 @@ def _collect_perf_from_proc(ssh_client, duration_minutes, interval_seconds):
                 if line.startswith("MemTotal:"): mem_total = int(line.split()[1])
                 elif line.startswith("MemAvailable:"): mem_available = int(line.split()[1])
             if mem_total > 0:
-                mem_used = 100.0 * ((mem_total - mem_available) / mem_total)
-                all_metrics.append({'metric_name': 'memory_percent_used', 'value': round(mem_used, 2), 'timestamp': collection_timestamp})
+                mem_used_percent = 100.0 * ((mem_total - mem_available) / mem_total)
+                all_metrics.append({'metric_name': 'memory_percent_used', 'value': round(mem_used_percent, 2), 'timestamp': collection_timestamp})
+        # Disk
+        stdout, _ = execute_ssh_command(ssh_client, "cat /proc/diskstats")
+        if stdout:
+            current_disk_stats = _parse_diskstats(stdout)
+            for device, curr_stats in current_disk_stats.items():
+                last_stats = last_disk_stats.get(device)
+                if last_stats:
+                    reads_iops = (curr_stats['reads_completed'] - last_stats['reads_completed']) / interval_seconds
+                    writes_iops = (curr_stats['writes_completed'] - last_stats['writes_completed']) / interval_seconds
+                    read_mbs = ((curr_stats['sectors_read'] - last_stats['sectors_read']) * 512) / (1024 * 1024 * interval_seconds)
+                    write_mbs = ((curr_stats['sectors_written'] - last_stats['sectors_written']) * 512) / (1024 * 1024 * interval_seconds)
+                    all_metrics.extend([
+                        {'metric_name': f'disk_iops_read_{device}', 'value': round(reads_iops, 2), 'timestamp': collection_timestamp},
+                        {'metric_name': f'disk_iops_write_{device}', 'value': round(writes_iops, 2), 'timestamp': collection_timestamp},
+                        {'metric_name': f'disk_throughput_read_mbs_{device}', 'value': round(read_mbs, 2), 'timestamp': collection_timestamp},
+                        {'metric_name': f'disk_throughput_write_mbs_{device}', 'value': round(write_mbs, 2), 'timestamp': collection_timestamp}
+                    ])
+            last_disk_stats = current_disk_stats
         time.sleep(interval_seconds)
     return all_metrics
 
@@ -247,25 +303,50 @@ def _collect_perf_with_sysstat(ssh_client, duration_minutes, interval_seconds):
     end_time = datetime.now() + timedelta(minutes=duration_minutes)
     while datetime.now() < end_time:
         collection_timestamp = datetime.now()
-        print(f"  [*] Collecting sysstat data point at {collection_timestamp.strftime('%H:%M:%S')}...")
-        # --- Added full implementation for CPU and Memory ---
-        # CPU Usage with sar
+        # print(f"  [*] Collecting sysstat data point at {collection_timestamp.strftime('%H:%M:%S')}...")
+        # CPU
         stdout, _ = execute_ssh_command(ssh_client, "sar -u 1 1")
         lines = stdout.strip().splitlines()
-        if len(lines) > 2 and lines[-1].split()[1] == 'all':
-            cpu_idle = float(lines[-1].split()[-1])
-            all_metrics.append({'metric_name': 'cpu_percent_utilization', 'value': round(100.0 - cpu_idle, 2), 'timestamp': collection_timestamp})
-
-        # Memory Usage with sar
+        if len(lines) > 2 and 'Average:' not in lines[-1] and lines[-1].split()[1] == 'all':
+            cpu_data = lines[-1].split()
+            all_metrics.extend([
+                {'metric_name': 'cpu_percent_user', 'value': float(cpu_data[2]), 'timestamp': collection_timestamp},
+                {'metric_name': 'cpu_percent_system', 'value': float(cpu_data[4]), 'timestamp': collection_timestamp},
+                {'metric_name': 'cpu_percent_iowait', 'value': float(cpu_data[5]), 'timestamp': collection_timestamp},
+                {'metric_name': 'cpu_percent_idle', 'value': float(cpu_data[7]), 'timestamp': collection_timestamp}
+            ])
+        # Memory
         stdout, _ = execute_ssh_command(ssh_client, "sar -r 1 1")
         lines = stdout.strip().splitlines()
+        if len(lines) > 2 and 'Average:' not in lines[-1]:
+            all_metrics.append({'metric_name': 'memory_percent_used', 'value': float(lines[-1].split()[3]), 'timestamp': collection_timestamp})
+        # Disk
+        stdout, _ = execute_ssh_command(ssh_client, "iostat -dx 1 2")
+        devices_data = stdout.strip().split('\n\n')
+        for block in devices_data:
+            if block.startswith('Device'):
+                 for line in block.strip().splitlines()[1:]:
+                    parts = line.split()
+                    if len(parts) >= 7:
+                        device_name = parts[0]
+                        all_metrics.extend([
+                            {'metric_name': f'disk_iops_read_{device_name}', 'value': float(parts[1]), 'timestamp': collection_timestamp},
+                            {'metric_name': f'disk_iops_write_{device_name}', 'value': float(parts[2]), 'timestamp': collection_timestamp}
+                        ])
+        # Network
+        stdout, _ = execute_ssh_command(ssh_client, "sar -n DEV 1 1")
+        lines = stdout.strip().splitlines()
         if len(lines) > 2:
-            try:
-                mem_used_percent = float(lines[-1].split()[3])
-                all_metrics.append({'metric_name': 'memory_percent_used', 'value': mem_used_percent, 'timestamp': collection_timestamp})
-            except (ValueError, IndexError):
-                pass # Ignore parsing errors for this data point
-        
+            for line in lines[2:]:
+                if 'Average:' in line or 'IFACE' in line: continue
+                net_data = line.split()
+                if len(net_data) >= 6:
+                    iface = net_data[1]
+                    if iface == 'lo': continue
+                    all_metrics.extend([
+                        {'metric_name': f'network_throughput_in_mbps_{iface}', 'value': round((float(net_data[4]) * 8) / 1024, 4), 'timestamp': collection_timestamp},
+                        {'metric_name': f'network_throughput_out_mbps_{iface}', 'value': round((float(net_data[5]) * 8) / 1024, 4), 'timestamp': collection_timestamp}
+                    ])
         time.sleep(interval_seconds)
     return all_metrics
 
@@ -279,84 +360,31 @@ def collect_linux_perf(ssh_client, duration_minutes: int, interval_seconds: int 
     else:
         return _collect_perf_from_proc(ssh_client, duration_minutes, interval_seconds)
 
-# --- NEW: Comprehensive Storage Discovery ---
-
-def discover_storage_mounts_linux(ssh_client):
+def discover_scheduled_tasks_linux(ssh_client):
     """
-    Discovers all storage mounts on a Linux host, identifying DAS, NAS, and SAN.
+    Discovers system-wide cron jobs from /etc/crontab and /etc/cron.d/.
     """
-    print("  [*] Discovering storage mounts (Linux)...")
-    mounts = []
-    
-    # 1. Get SAN device paths from multipath, if available
-    san_devices = set()
-    stdout, _ = execute_ssh_command(ssh_client, "command -v multipath")
-    if stdout:
-        print("    [-] Found multipath tools, checking for SAN LUNs...")
-        mp_stdout, _ = execute_ssh_command(ssh_client, "multipath -ll")
-        # Regex to find device mapper names like 'dm-2'
-        for line in mp_stdout.splitlines():
-            match = re.search(r'\((\w+)\)\s+dm-\d+', line)
-            if match:
-                san_devices.add(f"/dev/mapper/{match.group(1)}")
-
-    # 2. Get all mount points and their types
-    # Using -P to prevent line wrapping
-    # GNU coreutils does not allow -T/-P with --output at the same time
-    # Keep the custom column list and drop the other flags.
-    df_cmd = "df --output=source,fstype,size,used,target"
-    df_stdout, _ = execute_ssh_command(ssh_client, df_cmd)
-    
-    for line in df_stdout.strip().splitlines()[1:]: # Skip header
-        parts = line.split()
-        if not parts: continue
-        source, fs_type, total_kb, used_kb, mount_point = parts[0], parts[1], parts[2], parts[3], parts[4]
-
-        # Determine storage type
-        storage_type = "DAS" # Default to Direct-Attached Storage
-        if fs_type.startswith("nfs") or fs_type == "cifs":
-            storage_type = "NAS"
-        elif source in san_devices:
-            storage_type = "SAN"
-
-        try:
-            mounts.append({
-                "source": source,
-                "mount_point": mount_point,
-                "filesystem_type": fs_type,
-                "storage_type": storage_type,
-                "total_gb": round(int(total_kb) / (1024*1024), 2),
-                "used_gb": round(int(used_kb) / (1024*1024), 2)
-            })
-        except ValueError:
-            continue # Skip lines that don't parse correctly (like headers)
-            
-    return mounts
-
-def discover_process_open_files(ssh_client, pids: List[int]):
-    """
-    For a given list of Process IDs, find all open files using lsof.
-    """
-    if not pids:
-        return {}
-    
-    print("  [*] Discovering open files for running processes...")
-    # Create a single command to check all PIDs at once for efficiency
-    pid_str = ",".join(map(str, pids))
-    command = f"lsof -p {pid_str} -n -P | awk '{{print $2, $9}}'"
+    print("  [*] Discovering scheduled tasks (Linux Cron)...")
+    tasks = []
+    # Combine system crontab and cron.d files into one command
+    command = "cat /etc/crontab /etc/cron.d/* 2>/dev/null"
     stdout, _ = execute_ssh_command(ssh_client, command)
-
-    open_files_map = defaultdict(list)
+    
+    # Regex to find valid cron lines, ignoring comments and env settings
+    cron_line_regex = re.compile(r'^\s*([^#\s]+)\s+([^#\s]+)\s+([^#\s]+)\s+([^#\s]+)\s+([^#\s]+)\s+([^#\s]+)\s+(.*)')
+    
     for line in stdout.strip().splitlines():
-        try:
-            pid, file_path = line.split(maxsplit=1)
-            # We only care about absolute paths to files, not sockets or pipes
-            if file_path.startswith('/'):
-                open_files_map[int(pid)].append(file_path)
-        except ValueError:
-            continue
-            
-    return open_files_map
+        match = cron_line_regex.search(line)
+        if match:
+            minute, hour, day_of_month, month, day_of_week, user, cmd = match.groups()
+            schedule = f"{minute} {hour} {day_of_month} {month} {day_of_week}"
+            tasks.append({
+                "name": f"Cron: {user} - {cmd[:30]}...",
+                "command": cmd,
+                "schedule": schedule,
+                "enabled": True
+            })
+    return tasks
 
 def get_all_linux_data(ssh_client, user, perf_duration, perf_interval, config_targets):
     """Wrapper to call all Linux discovery functions and bundle the data."""
@@ -366,48 +394,22 @@ def get_all_linux_data(ssh_client, user, perf_duration, perf_interval, config_ta
     installed_sw = discover_installed_software_linux(ssh_client)
     storage_mounts = discover_storage_mounts_linux(ssh_client)
     config_files = discover_config_files(ssh_client, config_targets)
+    scheduled_tasks = discover_scheduled_tasks_linux(ssh_client)
     
     running_pids = [p['pid'] for p in sw_data.get('running_processes', [])]
     open_files_map = discover_process_open_files(ssh_client, running_pids)
     for proc in sw_data.get('running_processes', []):
         proc['open_files'] = open_files_map.get(proc['pid'], [])
-
+        
     perf_data = collect_linux_perf(ssh_client, perf_duration, perf_interval)
     
     return {
-        **hw_data, 
-        **sw_data, 
-        "network_connections": net_data,
-        "installed_software": installed_sw,
-        "storage_mounts": storage_mounts,
-        "config_files": config_files
+        **hw_data, **sw_data, "network_connections": net_data,
+        "installed_software": installed_sw, "storage_mounts": storage_mounts,
+        "config_files": config_files, "scheduled_tasks": scheduled_tasks
     }, perf_data
 
-def discover_installed_software_windows(winrm_session):
-    """
-    Discovers installed software on a Windows host by querying the registry.
-    """
-    print("  [*] Discovering installed software (Windows)...")
-    software_list = []
-    # Query both 32-bit and 64-bit uninstall keys
-    paths = [
-        "HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*",
-        "HKLM:\\Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*"
-    ]
-    for path in paths:
-        cmd = f"Get-ItemProperty {path} | Where-Object {{ $_.DisplayName -ne $null }} | Select-Object DisplayName, DisplayVersion, Publisher"
-        sw_data, err = execute_ps_command(winrm_session, cmd)
-        if not err and sw_data:
-            if not isinstance(sw_data, list):
-                sw_data = [sw_data]
-            for item in sw_data:
-                software_list.append({
-                    "name": item.get('DisplayName'),
-                    "version": item.get('DisplayVersion'),
-                    "vendor": item.get('Publisher')
-                })
-    # Remove duplicates that might appear in both hives
-    return [dict(t) for t in {tuple(d.items()) for d in software_list}]
+# --- WINDOWS DISCOVERY FUNCTIONS ---
 
 def discover_windows_hw(winrm_session):
     """Discovers hardware details from a Windows host."""
@@ -424,7 +426,10 @@ def discover_windows_hw(winrm_session):
     return hw_details
 
 def discover_windows_sw(winrm_session):
-    """Discovers software details from a Windows host."""
+    """
+    Discovers software and process details from a Windows host, now including
+    the full command line for each process.
+    """
     sw_details = {}
     print("  [*] Discovering Windows Software...")
     hostname_info, _ = execute_ps_command(winrm_session, "$env:COMPUTERNAME")
@@ -433,11 +438,20 @@ def discover_windows_sw(winrm_session):
     if os_info:
         sw_details['os_name'] = os_info.get('Caption')
         sw_details['os_version'] = os_info.get('Version')
-    proc_info, _ = execute_ps_command(winrm_session, "Get-Process | Select-Object ProcessName, Id, SI")
+    
+    # --- Use Win32_Process to get CommandLine ---
+    proc_info, _ = execute_ps_command(winrm_session, "Get-CimInstance Win32_Process | Select-Object ProcessId, Name, CommandLine")
     if proc_info:
         processes = []
+        if not isinstance(proc_info, list): proc_info = [proc_info]
         for proc in proc_info:
-            processes.append({'process_name': proc.get('ProcessName'), 'pid': proc.get('Id'), 'state': proc.get('SI'), 'user': None})
+            processes.append({
+                'pid': proc.get('ProcessId'),
+                'process_name': proc.get('Name'),
+                'command_line': proc.get('CommandLine'),
+                'user': None, # Getting user is a separate, more complex query
+                'state': None # State is not directly available here
+            })
         sw_details['running_processes'] = processes
     return sw_details
 
@@ -455,105 +469,101 @@ def discover_windows_network(winrm_session):
         connections.append({"destination_ip": dest_ip, "destination_port": conn.get('RemotePort'), "state": conn.get('State'), "process_name": conn.get('ProcessName'), "process_pid": conn.get('OwningProcess')})
     return connections
 
-def collect_windows_perf(winrm_session, duration_minutes: int, counters: List[str], interval_seconds: int = 60):
-    """
-    Collects performance metrics from a Windows host over a specified duration.
-    Refactored to accept a list of counters and a configurable interval.
-    """
-    if duration_minutes == 0 or not counters:
-        return []
-
-    print(f"[*] Starting {duration_minutes}-minute performance baseline for Windows host...")
-    all_metrics = []
-    end_time = datetime.now() + timedelta(minutes=duration_minutes)
-
-    # Format the counter list (provided as a parameter) for the Get-Counter command
-    counter_list_str = ",".join([f'"{c}"' for c in counters])
-
-    while datetime.now() < end_time:
-        collection_timestamp = datetime.now()
-        print(f"  [*] Collecting Windows performance data point at {collection_timestamp.strftime('%H:%M:%S')}...")
-        
-        command = f"Get-Counter -Counter {counter_list_str} | Select-Object -ExpandProperty CounterSamples"
-        perf_data, err = execute_ps_command(winrm_session, command)
-
-        if err:
-            print(f"  [-] Error collecting performance counters: {err}")
-            time.sleep(interval_seconds)
-            continue
-        
-        if not perf_data:
-            time.sleep(interval_seconds)
-            continue
-            
-        if not isinstance(perf_data, list):
-            perf_data = [perf_data]
-
-        for sample in perf_data:
-            path = sample.get('Path', '').lower()
-            metric_name = path.split('\\')[-1].replace(' ', '_').replace('%', 'percent')
-            instance_match = re.search(r'\((.*?)\)', path)
-            if instance_match:
-                instance_name = instance_match.group(1).replace(':', '')
-                metric_name = f"{metric_name.split('(')[0]}_{instance_name}"
-
-            all_metrics.append({
-                'metric_name': metric_name,
-                'value': round(sample.get('CookedValue', 0.0), 4),
-                'timestamp': collection_timestamp
-            })
-        
-        # Wait for the next collection cycle using the configurable interval
-        time.sleep(interval_seconds)
-
-    print(f"[*] Finished performance baseline. Collected {len(all_metrics)} data points.")
-    return all_metrics
+def discover_installed_software_windows(winrm_session):
+    """Discovers installed software on a Windows host by querying the registry."""
+    print("  [*] Discovering installed software (Windows)...")
+    software_list = []
+    paths = [
+        "HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*",
+        "HKLM:\\Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*"
+    ]
+    for path in paths:
+        cmd = f"Get-ItemProperty {path} | Where-Object {{ $_.DisplayName -ne $null }} | Select-Object DisplayName, DisplayVersion, Publisher"
+        sw_data, err = execute_ps_command(winrm_session, cmd)
+        if not err and sw_data:
+            if not isinstance(sw_data, list): sw_data = [sw_data]
+            for item in sw_data:
+                software_list.append({"name": item.get('DisplayName'), "version": item.get('DisplayVersion'), "vendor": item.get('Publisher')})
+    return [dict(t) for t in {tuple(d.items()) for d in software_list}]
 
 def discover_storage_mounts_windows(winrm_session):
-    """
-    Discovers all storage volumes on a Windows host, identifying DAS, NAS, and SAN.
-    """
+    """Discovers all storage volumes on a Windows host."""
     print("  [*] Discovering storage mounts (Windows)...")
     mounts = []
-    
-    # 1. Check for iSCSI connections (SAN)
-    iscsi_disks = set()
-    cmd_iscsi = "Get-WmiObject -Namespace root\\wmi -ClassName MSiSCSIInitiator_SessionClass | ForEach-Object { $_.Devices.DeviceNumber }"
-    iscsi_data, _ = execute_ps_command(winrm_session, cmd_iscsi)
-    if iscsi_data:
-        if not isinstance(iscsi_data, list): iscsi_data = [iscsi_data]
-        iscsi_disks.update(iscsi_data)
-
-    # 2. Get all volumes
     cmd_vol = "Get-Volume | Select-Object DriveLetter, FileSystem, Size, SizeRemaining"
     vol_data, _ = execute_ps_command(winrm_session, cmd_vol)
     if not vol_data: return mounts
     if not isinstance(vol_data, list): vol_data = [vol_data]
-
     for vol in vol_data:
         drive_letter = vol.get('DriveLetter')
         if not drive_letter: continue
-
-        # Determine storage type
-        storage_type = "DAS" # Default
+        storage_type = "DAS"
         fs_type = vol.get('FileSystem')
-        if fs_type in ['NFS', 'ReFS', 'CSVFS']: # Common network filesystems
-            storage_type = "NAS"
-        
-        # Check if this disk is an iSCSI LUN
-        # This requires correlating drive letter to disk number, which is complex.
-        # For now, we'll placeholder this logic. A more advanced script would be needed.
-        # if disk_number in iscsi_disks: storage_type = "SAN"
-
+        if fs_type in ['NFS', 'ReFS', 'CSVFS']: storage_type = "NAS"
         mounts.append({
-            "source": f"{drive_letter}:\\",
-            "mount_point": f"{drive_letter}:\\",
-            "filesystem_type": fs_type,
-            "storage_type": storage_type,
+            "source": f"{drive_letter}:\\", "mount_point": f"{drive_letter}:\\",
+            "filesystem_type": fs_type, "storage_type": storage_type,
             "total_gb": round(vol.get('Size', 0) / (1024**3), 2),
             "used_gb": round((vol.get('Size', 0) - vol.get('SizeRemaining', 0)) / (1024**3), 2)
         })
     return mounts
+
+def collect_windows_perf(winrm_session, duration_minutes: int, counters: List[str], interval_seconds: int = 60):
+    """Collects a detailed list of performance metrics from a Windows host."""
+    if duration_minutes == 0 or not counters: return []
+    print(f"[*] Starting {duration_minutes}-minute performance baseline for Windows host...")
+    all_metrics = []
+    end_time = datetime.now() + timedelta(minutes=duration_minutes)
+    counter_list_str = ",".join([f'"{c}"' for c in counters])
+    command = f"Get-Counter -Counter {counter_list_str} | Select-Object -ExpandProperty CounterSamples"
+    while datetime.now() < end_time:
+        collection_timestamp = datetime.now()
+        # print(f"  [*] Collecting Windows performance data point at {collection_timestamp.strftime('%H:%M:%S')}...")
+        perf_data, err = execute_ps_command(winrm_session, command)
+        if err or not perf_data:
+            time.sleep(interval_seconds)
+            continue
+        if not isinstance(perf_data, list): perf_data = [perf_data]
+        for sample in perf_data:
+            try:
+                path = sample.get('Path', '').lower()
+                metric_base_name = path.split('\\')[-1]
+                metric_name = metric_base_name.replace(' ', '_').replace('%', 'percent').replace('/', '_per_')
+                instance_match = re.search(r'\((.*?)\)', metric_name)
+                if instance_match:
+                    instance_name = instance_match.group(1).replace(':', '').replace('#', '_')
+                    instance_name = re.sub(r'[^a-zA-Z0-9_]', '_', instance_name)
+                    metric_name = f"{metric_name.split('(')[0]}_{instance_name}"
+                all_metrics.append({'metric_name': metric_name, 'value': round(sample.get('CookedValue', 0.0), 4), 'timestamp': collection_timestamp})
+            except (ValueError, TypeError, AttributeError): continue
+        time.sleep(interval_seconds)
+    print(f"[*] Finished Windows performance baseline. Collected {len(all_metrics)} data points.")
+    return all_metrics
+
+def discover_scheduled_tasks_windows(winrm_session):
+    """
+    Discovers all enabled scheduled tasks on a Windows host.
+    """
+    print("  [*] Discovering scheduled tasks (Windows)...")
+    tasks = []
+    # Get enabled tasks and select relevant properties, including the actions
+    command = "Get-ScheduledTask | Where-Object { $_.State -ne 'Disabled' } | ForEach-Object { $_ | Select-Object -Property TaskName, TaskPath, State, @{Name='Actions';Expression={($_.Actions | ForEach-Object { $_.Execute + ' ' + $_.Arguments }) -join '; '}} }"
+    task_data, err = execute_ps_command(winrm_session, command)
+    
+    if err or not task_data:
+        return tasks
+        
+    if not isinstance(task_data, list):
+        task_data = [task_data]
+
+    for task in task_data:
+        tasks.append({
+            "name": task.get('TaskName'),
+            "command": task.get('Actions'),
+            "schedule": task.get('TaskPath'), # Using TaskPath as a proxy for schedule info
+            "enabled": task.get('State') == 'Ready' or task.get('State') == 'Running'
+        })
+    return tasks
 
 def get_all_windows_data(win_session, perf_duration, perf_interval, config_targets):
     """Wrapper to call all Windows discovery functions and bundle the data."""
@@ -562,14 +572,14 @@ def get_all_windows_data(win_session, perf_duration, perf_interval, config_targe
     net_data = discover_windows_network(win_session)
     installed_sw = discover_installed_software_windows(win_session)
     storage_mounts = discover_storage_mounts_windows(win_session)
-    # Windows config file discovery would go here
-    perf_data = collect_windows_perf(win_session, perf_duration, [], perf_interval)
-
+    config_files = [] 
+    scheduled_tasks = discover_scheduled_tasks_windows(win_session)
+    
+    windows_counters = config_targets.get('performance_counters', {}).get('windows', [])
+    perf_data = collect_windows_perf(win_session, perf_duration, windows_counters, perf_interval)
+    
     return {
-        **hw_data, 
-        **sw_data, 
-        "network_connections": net_data,
-        "installed_software": installed_sw,
-        "storage_mounts": storage_mounts,
-        "config_files": []
+        **hw_data, **sw_data, "network_connections": net_data,
+        "installed_software": installed_sw, "storage_mounts": storage_mounts,
+        "config_files": config_files, "scheduled_tasks": scheduled_tasks
     }, perf_data

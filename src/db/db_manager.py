@@ -17,8 +17,34 @@ def create_connection():
 def create_tables(conn):
     """Create or check all necessary tables in the SQLite database."""
     c = conn.cursor()
-    c.execute("CREATE TABLE IF NOT EXISTS servers (id INTEGER PRIMARY KEY, hostname TEXT NOT NULL, ip_address TEXT UNIQUE NOT NULL, os_name TEXT, os_version TEXT, cpu_cores INTEGER, total_memory_gb REAL, discovery_timestamp DATETIME NOT NULL);")
-    c.execute("CREATE TABLE IF NOT EXISTS applications (id INTEGER PRIMARY KEY, server_id INTEGER NOT NULL, process_name TEXT NOT NULL, pid INTEGER, user TEXT, state TEXT, FOREIGN KEY (server_id) REFERENCES servers (id));")
+    
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS servers (
+        id INTEGER PRIMARY KEY,
+        hostname TEXT NOT NULL,
+        ip_address TEXT UNIQUE NOT NULL,
+        os_name TEXT,
+        os_version TEXT,
+        cpu_cores INTEGER,
+        total_memory_gb REAL,
+        discovery_timestamp DATETIME NOT NULL
+    );
+    """)
+    
+    # --- BUG FIX: Added command_line column to the schema definition ---
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS applications (
+        id INTEGER PRIMARY KEY,
+        server_id INTEGER NOT NULL,
+        process_name TEXT NOT NULL,
+        pid INTEGER,
+        user TEXT,
+        state TEXT,
+        command_line TEXT,
+        FOREIGN KEY (server_id) REFERENCES servers (id)
+    );
+    """)
+    
     c.execute("CREATE TABLE IF NOT EXISTS performance_metrics (id INTEGER PRIMARY KEY, server_id INTEGER NOT NULL, metric_name TEXT NOT NULL, metric_value REAL NOT NULL, timestamp DATETIME NOT NULL, FOREIGN KEY (server_id) REFERENCES servers (id));")
     c.execute("CREATE TABLE IF NOT EXISTS network_connections (id INTEGER PRIMARY KEY, source_server_id INTEGER NOT NULL, destination_ip TEXT NOT NULL, destination_port INTEGER NOT NULL, state TEXT, process_name TEXT, process_pid INTEGER, FOREIGN KEY (source_server_id) REFERENCES servers (id));")
     c.execute("CREATE TABLE IF NOT EXISTS installed_software (id INTEGER PRIMARY KEY, server_id INTEGER NOT NULL, name TEXT NOT NULL, version TEXT, vendor TEXT, FOREIGN KEY (server_id) REFERENCES servers (id));")
@@ -26,11 +52,45 @@ def create_tables(conn):
     c.execute("CREATE TABLE IF NOT EXISTS configuration_files (id INTEGER PRIMARY KEY, server_id INTEGER NOT NULL, file_path TEXT NOT NULL, content TEXT, FOREIGN KEY (server_id) REFERENCES servers (id));")
     c.execute("CREATE TABLE IF NOT EXISTS extracted_config_pairs (id INTEGER PRIMARY KEY, config_file_id INTEGER NOT NULL, key TEXT NOT NULL, value TEXT, FOREIGN KEY (config_file_id) REFERENCES configuration_files (id));")
     c.execute("CREATE TABLE IF NOT EXISTS process_open_files (id INTEGER PRIMARY KEY, application_id INTEGER NOT NULL, file_path TEXT NOT NULL, FOREIGN KEY (application_id) REFERENCES applications (id));")
+    c.execute("CREATE TABLE IF NOT EXISTS application_config_map (application_id INTEGER NOT NULL, config_file_id INTEGER NOT NULL, PRIMARY KEY (application_id, config_file_id), FOREIGN KEY (application_id) REFERENCES applications (id), FOREIGN KEY (config_file_id) REFERENCES configuration_files (id));")
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS scheduled_tasks (
+        id INTEGER PRIMARY KEY,
+        server_id INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        command TEXT NOT NULL,
+        schedule TEXT,
+        enabled BOOLEAN,
+        FOREIGN KEY (server_id) REFERENCES servers (id)
+    );
+    """)
+
     conn.commit()
     print("[*] All tables checked/created successfully.")
 
+def clear_snapshot_data_for_server(conn, server_id: int):
+    """
+    Deletes all state-based data for a given server_id before new data is inserted.
+    """
+    cursor = conn.cursor()
+    print(f"[*] Clearing old snapshot data for server_id: {server_id}")
+    
+    app_ids_to_delete = [row[0] for row in cursor.execute("SELECT id FROM applications WHERE server_id = ?", (server_id,)).fetchall()]
+    if app_ids_to_delete:
+        cursor.executemany("DELETE FROM process_open_files WHERE application_id = ?", [(app_id,) for app_id in app_ids_to_delete])
+        cursor.executemany("DELETE FROM application_config_map WHERE application_id = ?", [(app_id,) for app_id in app_ids_to_delete])
+
+    cursor.execute("DELETE FROM applications WHERE server_id = ?", (server_id,))
+    cursor.execute("DELETE FROM network_connections WHERE source_server_id = ?", (server_id,))
+    cursor.execute("DELETE FROM installed_software WHERE server_id = ?", (server_id,))
+    cursor.execute("DELETE FROM storage_mounts WHERE server_id = ?", (server_id,))
+    cursor.execute("DELETE FROM configuration_files WHERE server_id = ?", (server_id,))
+    cursor.execute("DELETE FROM scheduled_tasks WHERE server_id = ?", (server_id,))
+    
+    conn.commit()
+
 def add_servers_bulk(conn, server_list: List[Tuple]):
-    """Adds or updates a batch of servers using a more robust INSERT/UPDATE pattern."""
+    """Adds or updates a batch of servers."""
     if not server_list: return
     cursor = conn.cursor()
     insert_sql = 'INSERT INTO servers(hostname, ip_address, os_name, os_version, cpu_cores, total_memory_gb, discovery_timestamp) VALUES(?,?,?,?,?,?,?)'
@@ -50,56 +110,47 @@ def add_servers_bulk(conn, server_list: List[Tuple]):
 def add_applications_bulk(conn, app_list: List[Tuple]):
     """Adds a batch of application processes."""
     if not app_list: return
-    sql = 'INSERT INTO applications(server_id, process_name, pid, user, state) VALUES(?,?,?,?,?)'
+    sql = 'INSERT INTO applications(server_id, process_name, pid, user, state, command_line) VALUES(?,?,?,?,?,?)'
     conn.cursor().executemany(sql, app_list)
     conn.commit()
     print(f"[*] Successfully inserted {len(app_list)} application process records.")
 
+def add_scheduled_tasks_bulk(conn, tasks_list: List[Tuple]):
+    """Adds a batch of scheduled tasks."""
+    if not tasks_list: return
+    sql = 'INSERT INTO scheduled_tasks(server_id, name, command, schedule, enabled) VALUES(?,?,?,?,?)'
+    conn.cursor().executemany(sql, tasks_list)
+    conn.commit()
+    print(f"[*] Successfully inserted {len(tasks_list)} scheduled task records.")
+
 def add_performance_metrics_bulk(conn, metrics_data: List[Tuple]):
-    """Adds a batch of performance metrics."""
     if not metrics_data: return
-    sql = 'INSERT INTO performance_metrics(server_id, metric_name, metric_value, timestamp) VALUES(?,?,?,?)'
-    conn.cursor().executemany(sql, metrics_data)
+    conn.cursor().executemany('INSERT INTO performance_metrics(server_id, metric_name, metric_value, timestamp) VALUES(?,?,?,?)', metrics_data)
     conn.commit()
     print(f"[*] Successfully inserted {len(metrics_data)} performance metric records.")
-
 def add_network_connections_bulk(conn, connections_data: List[Tuple]):
-    """Adds a batch of network connections."""
     if not connections_data: return
-    sql = 'INSERT INTO network_connections(source_server_id, destination_ip, destination_port, state, process_name, process_pid) VALUES(?,?,?,?,?,?)'
-    conn.cursor().executemany(sql, connections_data)
+    conn.cursor().executemany('INSERT INTO network_connections(source_server_id, destination_ip, destination_port, state, process_name, process_pid) VALUES(?,?,?,?,?,?)', connections_data)
     conn.commit()
     print(f"[*] Successfully inserted {len(connections_data)} network connection records.")
-
 def add_installed_software_bulk(conn, software_list: List[Tuple]):
-    """Adds a batch of installed software."""
     if not software_list: return
-    sql = 'INSERT INTO installed_software(server_id, name, version, vendor) VALUES(?,?,?,?)'
-    conn.cursor().executemany(sql, software_list)
+    conn.cursor().executemany('INSERT INTO installed_software(server_id, name, version, vendor) VALUES(?,?,?,?)', software_list)
     conn.commit()
     print(f"[*] Successfully inserted {len(software_list)} installed software records.")
-
 def add_storage_mounts_bulk(conn, mounts_list: List[Tuple]):
-    """Adds a batch of storage mounts."""
     if not mounts_list: return
-    sql = 'INSERT INTO storage_mounts(server_id, source, mount_point, filesystem_type, storage_type, total_gb, used_gb) VALUES(?,?,?,?,?,?,?)'
-    conn.cursor().executemany(sql, mounts_list)
+    conn.cursor().executemany('INSERT INTO storage_mounts(server_id, source, mount_point, filesystem_type, storage_type, total_gb, used_gb) VALUES(?,?,?,?,?,?,?)', mounts_list)
     conn.commit()
     print(f"[*] Successfully inserted {len(mounts_list)} storage mount records.")
-
 def add_config_files_bulk(conn, files_list: List[Tuple]):
-    """Adds a batch of configuration files."""
     if not files_list: return
-    sql = 'INSERT INTO configuration_files(server_id, file_path, content) VALUES(?,?,?)'
-    conn.cursor().executemany(sql, files_list)
+    conn.cursor().executemany('INSERT INTO configuration_files(server_id, file_path, content) VALUES(?,?,?)', files_list)
     conn.commit()
     print(f"[*] Successfully inserted {len(files_list)} configuration file records.")
-
 def add_open_files_bulk(conn, open_files_list: List[Tuple]):
-    """Adds a batch of open file records for processes."""
     if not open_files_list: return
-    sql = 'INSERT INTO process_open_files(application_id, file_path) VALUES(?,?)'
-    conn.cursor().executemany(sql, open_files_list)
+    conn.cursor().executemany('INSERT INTO process_open_files(application_id, file_path) VALUES(?,?)', open_files_list)
     conn.commit()
     print(f"[*] Successfully inserted {len(open_files_list)} open file records.")
 
