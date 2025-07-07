@@ -386,6 +386,30 @@ def discover_scheduled_tasks_linux(ssh_client):
             })
     return tasks
 
+def discover_ipc_connections_linux(ssh_client):
+    """
+    Discovers Inter-Process Communication via Unix domain sockets.
+    """
+    print("  [*] Discovering IPC (Unix socket) connections...")
+    ipc_connections = []
+    command = "ss -xnp"
+    stdout, _ = execute_ssh_command(ssh_client, command)
+
+    # Regex to find an established (ESTAB) Unix socket connection and capture both PIDs
+    # Example: u_str ESTAB 0 0 * 22693 * 22694 users:(("processA",pid=123,fd=5),("processB",pid=456,fd=4))
+    ipc_regex = re.compile(r'ESTAB\s+0\s+0\s+\S+\s+\d+\s+\S+\s+\d+\s+users:\(.*?,pid=(\d+).*?,pid=(\d+)')
+
+    for line in stdout.splitlines():
+        match = ipc_regex.search(line)
+        if match:
+            source_pid, dest_pid = match.groups()
+            ipc_connections.append({
+                "source_pid": int(source_pid),
+                "dest_pid": int(dest_pid),
+                "path": "unix_socket" # Path is hard to get reliably, so we use a generic type
+            })
+    return ipc_connections
+
 def get_all_linux_data(ssh_client, user, perf_duration, perf_interval, config_targets):
     """Wrapper to call all Linux discovery functions and bundle the data."""
     hw_data = discover_linux_hw(ssh_client, user)
@@ -395,6 +419,7 @@ def get_all_linux_data(ssh_client, user, perf_duration, perf_interval, config_ta
     storage_mounts = discover_storage_mounts_linux(ssh_client)
     config_files = discover_config_files(ssh_client, config_targets)
     scheduled_tasks = discover_scheduled_tasks_linux(ssh_client)
+    ipc_connections = discover_ipc_connections_linux(ssh_client)
     
     running_pids = [p['pid'] for p in sw_data.get('running_processes', [])]
     open_files_map = discover_process_open_files(ssh_client, running_pids)
@@ -406,7 +431,8 @@ def get_all_linux_data(ssh_client, user, perf_duration, perf_interval, config_ta
     return {
         **hw_data, **sw_data, "network_connections": net_data,
         "installed_software": installed_sw, "storage_mounts": storage_mounts,
-        "config_files": config_files, "scheduled_tasks": scheduled_tasks
+        "config_files": config_files, "scheduled_tasks": scheduled_tasks,
+        "ipc_connections": ipc_connections
     }, perf_data
 
 # --- WINDOWS DISCOVERY FUNCTIONS ---

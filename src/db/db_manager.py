@@ -31,7 +31,6 @@ def create_tables(conn):
     );
     """)
     
-    # --- BUG FIX: Added command_line column to the schema definition ---
     c.execute("""
     CREATE TABLE IF NOT EXISTS applications (
         id INTEGER PRIMARY KEY,
@@ -53,6 +52,8 @@ def create_tables(conn):
     c.execute("CREATE TABLE IF NOT EXISTS extracted_config_pairs (id INTEGER PRIMARY KEY, config_file_id INTEGER NOT NULL, key TEXT NOT NULL, value TEXT, FOREIGN KEY (config_file_id) REFERENCES configuration_files (id));")
     c.execute("CREATE TABLE IF NOT EXISTS process_open_files (id INTEGER PRIMARY KEY, application_id INTEGER NOT NULL, file_path TEXT NOT NULL, FOREIGN KEY (application_id) REFERENCES applications (id));")
     c.execute("CREATE TABLE IF NOT EXISTS application_config_map (application_id INTEGER NOT NULL, config_file_id INTEGER NOT NULL, PRIMARY KEY (application_id, config_file_id), FOREIGN KEY (application_id) REFERENCES applications (id), FOREIGN KEY (config_file_id) REFERENCES configuration_files (id));")
+
+    print("[*] Creating 'scheduled_tasks' table...")
     c.execute("""
     CREATE TABLE IF NOT EXISTS scheduled_tasks (
         id INTEGER PRIMARY KEY,
@@ -61,6 +62,18 @@ def create_tables(conn):
         command TEXT NOT NULL,
         schedule TEXT,
         enabled BOOLEAN,
+        FOREIGN KEY (server_id) REFERENCES servers (id)
+    );
+    """)
+
+    print("[*] Creating 'ipc_connections' table...")
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS ipc_connections (
+        id INTEGER PRIMARY KEY,
+        server_id INTEGER NOT NULL,
+        source_pid INTEGER NOT NULL,
+        dest_pid INTEGER NOT NULL,
+        path TEXT,
         FOREIGN KEY (server_id) REFERENCES servers (id)
     );
     """)
@@ -86,6 +99,7 @@ def clear_snapshot_data_for_server(conn, server_id: int):
     cursor.execute("DELETE FROM storage_mounts WHERE server_id = ?", (server_id,))
     cursor.execute("DELETE FROM configuration_files WHERE server_id = ?", (server_id,))
     cursor.execute("DELETE FROM scheduled_tasks WHERE server_id = ?", (server_id,))
+    cursor.execute("DELETE FROM ipc_connections WHERE server_id = ?", (server_id,))
     
     conn.commit()
 
@@ -123,6 +137,15 @@ def add_scheduled_tasks_bulk(conn, tasks_list: List[Tuple]):
     conn.commit()
     print(f"[*] Successfully inserted {len(tasks_list)} scheduled task records.")
 
+def add_ipc_connections_bulk(conn, ipc_list: List[Tuple]):
+    """Adds a batch of Inter-Process Communication connections."""
+    if not ipc_list: return
+    sql = 'INSERT INTO ipc_connections(server_id, source_pid, dest_pid, path) VALUES(?,?,?,?)'
+    conn.cursor().executemany(sql, ipc_list)
+    conn.commit()
+    print(f"[*] Successfully inserted {len(ipc_list)} IPC connection records.")
+
+# (Other bulk add functions remain unchanged)
 def add_performance_metrics_bulk(conn, metrics_data: List[Tuple]):
     if not metrics_data: return
     conn.cursor().executemany('INSERT INTO performance_metrics(server_id, metric_name, metric_value, timestamp) VALUES(?,?,?,?)', metrics_data)

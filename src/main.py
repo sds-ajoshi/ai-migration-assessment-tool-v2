@@ -10,6 +10,7 @@ from datetime import datetime
 import os
 import time
 from typing import List, Dict
+from collections import defaultdict
 
 import sys
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -125,13 +126,15 @@ def discover(
         mounts_to_add = [(server_id, m.get('source'), m.get('mount_point'), m.get('filesystem_type'), m.get('storage_type'), m.get('total_gb'), m.get('used_gb')) for m in data.get('storage_mounts', [])]
         configs_to_add = [(server_id, f.get('file_path'), f.get('content')) for f in data.get('config_files', [])]
         tasks_to_add = [(server_id, t.get('name'), t.get('command'), t.get('schedule'), t.get('enabled')) for t in data.get('scheduled_tasks', [])]
-        
+        ipc_to_add = [(server_id, i.get('source_pid'), i.get('dest_pid'), i.get('path')) for i in data.get('ipc_connections', [])]
+
         db_manager.add_applications_bulk(conn, apps_to_add)
         db_manager.add_network_connections_bulk(conn, connections_to_add)
         db_manager.add_installed_software_bulk(conn, software_to_add)
         db_manager.add_storage_mounts_bulk(conn, mounts_to_add)
         db_manager.add_config_files_bulk(conn, configs_to_add)
         db_manager.add_scheduled_tasks_bulk(conn, tasks_to_add)
+        db_manager.add_ipc_connections_bulk(conn, ipc_to_add)
 
         if res.get('perf_data'):
             metrics_to_add = [(server_id, m['metric_name'], m['value'], m['timestamp']) for m in res['perf_data']]
@@ -212,6 +215,25 @@ def discover(
     storage_table.add_column("Total Size (GB)")
     storage_table.add_column("Used (GB)")
     
+    tasks_table = Table(show_header=True, header_style="bold magenta", title="Discovered Scheduled Tasks")
+    tasks_table.add_column("Server IP", style="cyan")
+    tasks_table.add_column("Task Name / Schedule")
+    tasks_table.add_column("Command")
+
+    tasks_table = Table(show_header=True, header_style="bold magenta", title="Discovered Scheduled Tasks")
+    tasks_table.add_column("Server IP", style="cyan")
+    tasks_table.add_column("Task Name / Schedule")
+    tasks_table.add_column("Command")
+    
+    cursor = conn.cursor()
+    cursor.execute("SELECT s.ip_address, st.name, st.command, st.schedule FROM scheduled_tasks st JOIN servers s ON st.server_id = s.id ORDER BY s.ip_address")
+    task_rows = cursor.fetchall()
+    if not task_rows: tasks_table.add_row("N/A", "No scheduled tasks discovered.", "")
+    else:
+        for row in task_rows:
+            tasks_table.add_row(str(row[0]), f"{row[1]}\n[dim]{row[3]}[/dim]", str(row[2]))
+    console.print(tasks_table)
+
     cursor = conn.cursor()
     cursor.execute("SELECT s.ip_address, sm.mount_point, sm.storage_type, sm.filesystem_type, sm.total_gb, sm.used_gb FROM storage_mounts sm JOIN servers s ON sm.server_id = s.id ORDER BY s.ip_address, sm.mount_point")
     storage_rows = cursor.fetchall()
