@@ -1,81 +1,162 @@
+# src/db/neo4j_manager.py
+
 import os
-from neo4j import GraphDatabase, Driver
-from neo4j.exceptions import ServiceUnavailable, AuthError
-from rich.console import Console
+import logging
+from neo4j import GraphDatabase
 
-# Initialize Rich Console
-console = Console()
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [%(module)s] - %(message)s')
 
-def get_neo4j_driver() -> Driver | None:
+class Neo4jManager:
     """
-    Creates and returns a Neo4j driver instance.
-
-    This function securely loads connection details from environment variables
-    (NEO4J_URI, NEO4J_USER, NEO4J_PASS) and attempts to establish a connection
-    to the Neo4j database. It also verifies connectivity.
-
-    Returns:
-        neo4j.Driver | None: A connected Neo4j driver instance if successful, otherwise None.
+    Manages all interactions with the Neo4j database, including exporting the graph.
     """
-    uri = os.environ.get("NEO4J_URI")
-    user = os.environ.get("NEO4J_USER")
-    password = os.environ.get("NEO4J_PASS")
 
-    if not all([uri, user, password]):
-        console.print("[bold red]Error: Missing Neo4j environment variables.[/bold red]")
-        console.print("[bold yellow]Please set NEO4J_URI, NEO4J_USER, and NEO4J_PASS.[/bold yellow]")
-        return None
+    def __init__(self, uri, user, password):
+        """
+        Initializes the Neo4jManager and connects to the database.
 
-    try:
-        driver = GraphDatabase.driver(uri, auth=(user, password))
-        # Verify that the connection is valid
-        driver.verify_connectivity()
-        console.print(f"[*] Successful connection to Neo4j at [cyan]{uri}[/cyan]")
-        return driver
-    except AuthError:
-        console.print(f"[bold red]Neo4j Authentication Failed.[/bold red] Please check your NEO4J_USER and NEO4J_PASS environment variables.")
-        return None
-    except ServiceUnavailable as e:
-        console.print(f"[bold red]Neo4j Connection Failed: {e}[/bold red]")
-        console.print(f"  - Is the Neo4j database running at {uri}?")
-        console.print("  - Is the container port correctly mapped?")
-        return None
-    except Exception as e:
-        console.print(f"[bold red]An unexpected error occurred while connecting to Neo4j: {e}[/bold red]")
-        return None
+        Args:
+            uri (str): The URI for the Neo4j database (e.g., "bolt://localhost:7687").
+            user (str): The username for the database.
+            password (str): The password for the database.
+        """
+        try:
+            self.driver = GraphDatabase.driver(uri, auth=(user, password))
+            logging.info("Successfully connected to Neo4j database.")
+        except Exception as e:
+            logging.error(f"Failed to connect to Neo4j. Please check credentials and connection settings. Error: {e}")
+            self.driver = None
 
-def close_driver(driver: Driver | None):
+    def close(self):
+        """Closes the database connection."""
+        if self.driver:
+            self.driver.close()
+            logging.info("Neo4j connection closed.")
+
+    def _sanitize_properties(self, properties):
+        """
+        Sanitizes node/relationship properties to be compatible with Neo4j.
+        - Allows lists of primitive types to pass through for native array storage.
+        - Converts dictionaries and other complex types to strings.
+        """
+        sanitized = {}
+        if not properties:
+            return sanitized
+        for key, value in properties.items():
+            if value is None:
+                continue
+            
+            if isinstance(value, list):
+                # Check if all items in the list are primitive types that Neo4j supports in arrays
+                is_primitive_list = all(isinstance(item, (int, float, str, bool, type(None))) for item in value)
+                if is_primitive_list:
+                    sanitized[key] = value # Pass through as native array
+                else:
+                    # Convert list of complex types (e.g., list of dicts) to a string
+                    sanitized[key] = str(value)
+            elif isinstance(value, dict):
+                # Always convert dictionaries to a string representation
+                sanitized[key] = str(value)
+            elif isinstance(value, (int, float, str, bool)):
+                # Standard primitive types are supported directly
+                sanitized[key] = value
+            else:
+                # Fallback for any other unexpected types
+                sanitized[key] = str(value)
+        return sanitized
+
+    def export_graph_to_neo4j(self, G):
+        """
+        Exports the entire NetworkX graph (G) to the Neo4j database.
+        This function handles the new Digital Twin model with multiple node and relationship types.
+
+        Args:
+            G (networkx.DiGraph): The graph to export.
+        """
+        if not self.driver:
+            logging.error("No active Neo4j driver. Cannot export graph.")
+            return
+
+        with self.driver.session() as session:
+            logging.info("Clearing existing data from Neo4j database...")
+            session.run("MATCH (n) DETACH DELETE n")
+            logging.info("Database cleared.")
+
+            logging.info("Creating unique constraints for node labels...")
+            # Use a consistent primary key 'id' across all nodes for simplicity
+            session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (n:Server) REQUIRE n.id IS UNIQUE")
+            session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (n:Process) REQUIRE n.id IS UNIQUE")
+            session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (n:ExternalService) REQUIRE n.id IS UNIQUE")
+            session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (n:Software) REQUIRE n.id IS UNIQUE")
+            session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (n:ConfigurationFile) REQUIRE n.id IS UNIQUE")
+            session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (n:StorageMount) REQUIRE n.id IS UNIQUE")
+            logging.info("Constraints created successfully.")
+
+            logging.info("Starting node export to Neo4j...")
+            nodes = list(G.nodes(data=True))
+            batch_size = 500
+            for i in range(0, len(nodes), batch_size):
+                batch = nodes[i:i + batch_size]
+                node_data = []
+                for node_id, attrs in batch:
+                    properties = self._sanitize_properties(attrs)
+                    properties['id'] = node_id # Ensure the primary key is in the properties
+                    
+                    node_data.append({
+                        'id': node_id,
+                        'labels': [attrs.get('node_type', 'Unknown')],
+                        'properties': properties
+                    })
+                
+                # Using apoc.create.node for dynamic labels
+                session.run("""
+                    UNWIND $nodes as node_info
+                    MERGE (n {id: node_info.id})
+                    SET n = node_info.properties
+                    WITH n, node_info.labels as labels
+                    CALL apoc.create.addLabels(n, labels) YIELD node
+                    RETURN count(node)
+                """, nodes=node_data)
+                logging.info(f"Exported batch of {len(batch)} nodes.")
+            logging.info(f"Finished exporting {len(nodes)} nodes.")
+
+            logging.info("Starting relationship export to Neo4j...")
+            edges = list(G.edges(data=True))
+            for i in range(0, len(edges), batch_size):
+                batch = edges[i:i + batch_size]
+                edge_data = []
+                for source_id, dest_id, attrs in batch:
+                    rel_type = attrs.get('relationship_type', 'RELATED_TO').upper()
+                    properties = self._sanitize_properties(attrs)
+                    edge_data.append({
+                        'source': source_id,
+                        'target': dest_id,
+                        'type': rel_type,
+                        'properties': properties
+                    })
+
+                session.run("""
+                    UNWIND $rels as rel
+                    MATCH (a {id: rel.source})
+                    MATCH (b {id: rel.target})
+                    CALL apoc.create.relationship(a, rel.type, rel.properties, b) YIELD rel as result
+                    RETURN count(result)
+                """, rels=edge_data)
+                logging.info(f"Exported batch of {len(batch)} relationships.")
+            logging.info(f"Finished exporting {len(edges)} relationships.")
+            logging.info("Graph export to Neo4j completed successfully.")
+
+def get_neo4j_manager_from_env():
     """
-    Closes the Neo4j driver connection if it exists.
-
-    Args:
-        driver (neo4j.Driver | None): The driver instance to close.
+    Creates a Neo4jManager instance from environment variables.
     """
-    if driver:
-        driver.close()
-        console.print("[*] Neo4j connection closed.")
+    uri = os.getenv("NEO4J_URI", "bolt://localhost:7687")
+    user = os.getenv("NEO4J_USER", "neo4j")
+    password = os.getenv("NEO4J_PASSWORD")
 
-
-# Example usage for standalone testing of this module
-if __name__ == '__main__':
-    console.rule("[bold blue]Testing Neo4j Connection Manager[/bold blue]")
+    if not password:
+        logging.error("NEO4J_PASSWORD environment variable not set. Cannot connect to Neo4j.")
+        return None
     
-    # For this test to work, you must have set the environment variables.
-    # On Linux/macOS:
-    # export NEO4J_URI="bolt://localhost:7687"
-    # export NEO4J_USER="neo4j"
-    # export NEO4J_PASS="password123"
-    #
-    # On Windows (Command Prompt):
-    # set NEO4J_URI=bolt://localhost:7687
-    # set NEO4J_USER=neo4j
-    # set NEO4J_PASS=password123
-    
-    driver = get_neo4j_driver()
-
-    if driver:
-        console.print("[bold green]Connectivity test successful![/bold green]")
-        # In a real application, you would now use the driver to run queries.
-        close_driver(driver)
-    else:
-        console.print("[bold red]Connectivity test failed.[/bold red]")
+    return Neo4jManager(uri, user, password)
