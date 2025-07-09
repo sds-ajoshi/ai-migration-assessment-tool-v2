@@ -48,3 +48,8 @@ performance_counters:
     # Network I/O
     - "\\Network Interface(*)\\Bytes Received/sec"
     - "\\Network Interface(*)\\Bytes Sent/sec"
+
+neo4j:
+  uri: "bolt://localhost:7687"
+  user: "neo4j"
+  password: "password123"

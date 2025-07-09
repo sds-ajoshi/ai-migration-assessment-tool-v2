@@ -1,163 +1,130 @@
 # src/main.py
 
 import typer
+import yaml
 from rich.console import Console
-from rich.table import Table
-import logging
+from rich.panel import Panel
+from rich.rule import Rule
 from pathlib import Path
+import logging
 
-# The following imports assume the project structure where 'src' is the root
-# for the execution context, or the path is correctly configured.
 from agents.agent_data_ingestion import DataIngestionAgent
 from agents.agent_profiling import ProfilingAgent
 from db.db_manager import DBManager
-from db.neo4j_manager import get_neo4j_manager_from_env
+from db.neo4j_manager import Neo4jManager
 
-# Configure logging to show messages from our agents
-logging.basicConfig(
-    level=logging.INFO, 
-    format='%(asctime)s - %(levelname)s - [%(module)s] - %(message)s'
-)
+# Suppress noisy logs from third-party libraries
+logging.getLogger("paramiko").setLevel(logging.WARNING)
+logging.getLogger("winrm").setLevel(logging.WARNING)
 
-# Initialize Typer app and Rich console
-app = typer.Typer()
 console = Console()
 
-@app.command()
-def discover(
-    inventory_file: Path = typer.Option(
-        "inventory.csv", 
-        "--inventory", 
-        "-i", 
-        help="Path to the inventory CSV file.",
-    ),
-    db_file: str = typer.Option(
-        "assessment_history.db", 
-        "--dbfile", 
-        "-db", 
-        help="Path to the SQLite database file."
-    ),
-    workers: int = typer.Option(
-        10, 
-        "--workers", 
-        "-w", 
-        help="Number of concurrent workers for discovery."
-    ),
-    export_to_neo4j: bool = typer.Option(
-        False, 
-        "--export-to-neo4j", 
-        help="Flag to export the final graph to Neo4j."
-    ),
-    fingerprint_services: bool = typer.Option(
-        False,
-        "--fingerprint-services",
-        help="Actively fingerprint external services using Nmap (requires Nmap to be installed)."
-    )
+app = typer.Typer(
+    name="ai-migration-assessment-tool",
+    help="""
+    An AI-Powered Migration Assessment Tool that discovers your IT landscape,
+    builds a Digital Twin, and provides intelligent migration recommendations.
+    """,
+    no_args_is_help=True,
+    rich_markup_mode="rich"
+)
+
+# A helper function to load the knowledge base
+def _load_knowledge_base():
+    try:
+        with open("knowledge_base.yaml", 'r') as f:
+            return yaml.safe_load(f)
+    except (FileNotFoundError, yaml.YAMLError):
+        return {}
+
+@app.command(
+    name="ingest",
+    help="""
+    [bold green]Phase 1:[/bold green] Ingests data from servers listed in the inventory file.
+    Connects to hosts, gathers system information, and persists it to a local SQLite database.
+    """
+)
+def ingest(
+    inventory_file: Path = typer.Option("inventory.csv", "--inventory-file", "-i", help="Path to the inventory CSV file."),
+    workers: int = typer.Option(10, "--workers", "-w", help="Number of concurrent workers for discovery."),
+    db_file: str = typer.Option("assessment_history.db", "--db-file", help="Path to the SQLite database file.")
 ):
-    """
-    Discover infrastructure, build a dependency graph, and run analysis.
-    """
-    console.rule("[bold green]AI-Powered Migration Assessment Tool[/bold green]")
+    console.print(Panel("Phase 1: Starting Data Ingestion", title="[bold cyan]AI-Powered Migration Assessment Tool[/bold cyan]", expand=False))
+    console.log(f"Using database file: {db_file}")
 
-    if not inventory_file.is_file():
-        console.print(f"[bold red]Error: Inventory file not found at '{inventory_file}'[/bold red]")
+    if not inventory_file.exists():
+        console.print(f"[bold red]Error: Inventory file not found at '{inventory_file}'.[/bold red]")
         raise typer.Exit(code=1)
 
-    # --- Phase 1: Data Ingestion ---
-    console.log(f"Using database file: [yellow]{db_file}[/yellow]")
     db_manager = DBManager(db_file)
-    db_manager.create_tables()
-
-    console.log(f"Starting data ingestion from inventory '[cyan]{inventory_file.name}[/cyan]' with {workers} workers...")
-    ingestion_agent = DataIngestionAgent(str(inventory_file), db_manager, max_workers=workers)
+    ingestion_agent = DataIngestionAgent(inventory_path=inventory_file, db_manager=db_manager, max_workers=workers)
+    
     ingestion_agent.run_discovery()
-    console.log("[bold green]Data ingestion complete.[/bold green]")
+    
+    console.log("Data ingestion complete.")
+    db_manager.close()
 
-    # --- Phase 2: Profiling, Graphing, and Correlation ---
-    console.rule("[bold blue]Phase 2: Analysis and Digital Twin Construction[/bold blue]")
+@app.command(
+    name="profile",
+    help="""
+    [bold green]Phase 2:[/bold green] Analyzes collected data to build the Digital Twin and find application clusters.
+    """
+)
+def profile(
+    db_file: str = typer.Option("assessment_history.db", "--db-file", help="Path to the SQLite database file."),
+    export_to_neo4j: bool = typer.Option(False, "--export-to-neo4j", help="Export the final dependency graph to Neo4j."),
+    fingerprint_services: bool = typer.Option(False, "--fingerprint-services", help="Attempt to fingerprint external services using nmap (requires nmap to be installed).")
+):
+    console.rule("[bold cyan]Phase 2: Analysis and Digital Twin Construction[/bold cyan]")
+    db_manager = DBManager(db_file)
+    
+    # *** THIS IS THE FINAL FIX ***
+    # This block correctly calls the new, refactored methods on the ProfilingAgent
+    
+    # 1. Initialize the agent, which builds the base graph of servers and processes
     profiling_agent = ProfilingAgent(db_manager)
-
-    console.log("Building base dependency graph...")
-    graph = profiling_agent.build_dependency_graph()
-    if not graph or graph.number_of_nodes() == 0:
-        console.print("[bold red]Error: Failed to build dependency graph or graph is empty. Aborting.[/bold red]")
-        db_manager.close()
-        raise typer.Exit(code=1)
-    console.log(f"Base dependency graph built successfully with {graph.number_of_nodes()} nodes and {graph.number_of_edges()} edges.")
-
-    console.log("[bold magenta]Correlating and enriching graph to create Digital Twin...[/bold magenta]")
-    profiling_agent.correlate_and_enrich_graph()
-    console.log("[bold green]Digital Twin enrichment complete.[/bold green]")
+    console.log(f"Base dependency graph built successfully with {profiling_agent.graph.number_of_nodes()} nodes and {profiling_agent.graph.number_of_edges()} edges.")
     
+    # 2. Enrich the graph with correlations (software, files, storage)
+    console.log("Correlating and enriching graph to create Digital Twin...")
+    profiling_agent.enrich_and_correlate()
+    console.log("Digital Twin enrichment complete.")
+
+    # 3. Find and report application clusters from the enriched graph
     console.log("Finding application clusters from enriched graph...")
-    clusters = profiling_agent.find_application_clusters()
-    if clusters:
-        console.log(f"Discovered {len(clusters)} application clusters.")
-    else:
-        console.log("No distinct application clusters found.")
+    profiling_agent.find_and_report_clusters()
 
-    console.log("Identifying external dependencies...")
-    external_deps = profiling_agent.get_external_dependencies()
-
-    if fingerprint_services and external_deps:
-        console.log("[bold yellow]Actively fingerprinting external services with Nmap...[/bold yellow]")
-        # This assumes a method `fingerprint_external_services` exists on the agent
-        # that takes the list of deps and returns an updated map.
-        external_deps = profiling_agent.fingerprint_external_services(external_deps)
-        console.log("[bold green]Service fingerprinting complete.[/bold green]")
-
-    # --- Reporting ---
-    console.rule("[bold cyan]Assessment Summary Report[/bold cyan]")
+    # 4. Identify and report external dependencies
+    if fingerprint_services:
+        console.log("Identifying and fingerprinting external dependencies...")
+        profiling_agent.identify_external_dependencies()
     
-    if external_deps:
-        deps_table = Table(title="Discovered External Endpoints")
-        deps_table.add_column("Endpoint (IP:Port)", style="yellow")
-        deps_table.add_column("Fingerprinted Service", style="blue")
-        for dep, details in external_deps.items():
-            service_name = details.get('name', 'unknown')
-            version = details.get('version', '')
-            deps_table.add_row(dep, f"{service_name} {version}".strip())
-        console.print(deps_table)
-    else:
-        console.print("[green]No external dependencies found.[/green]")
-
-    if clusters:
-        console.rule("[bold purple]Application Cluster Deep Dive[/bold purple]")
-        for i, cluster in enumerate(clusters):
-            cluster_name = f"Cluster-{i+1}"
-            cluster_table = Table(title=f"Details for {cluster_name}", show_lines=True)
-            cluster_table.add_column("Process", style="cyan", min_width=20)
-            cluster_table.add_column("Software Package", style="green", min_width=20)
-            cluster_table.add_column("Used Config File(s)", style="yellow")
-            cluster_table.add_column("Used Storage Mount(s)", style="magenta")
-
-            for process_id in sorted(cluster):
-                process_attrs = graph.nodes[process_id]
-                process_label = process_attrs.get('label', process_id)
-                software, configs, storage = profiling_agent.get_correlated_details(process_id)
-                configs_str = "\n".join(configs) if configs else "N/A"
-                storage_str = "\n".join(storage) if storage else "N/A"
-                cluster_table.add_row(process_label, software, configs_str, storage_str)
-            console.print(cluster_table)
-
-    # --- Phase 3: Export to Neo4j (Optional) ---
+    # 5. Optionally, export the final graph to Neo4j
     if export_to_neo4j:
-        console.rule("[bold magenta]Phase 3: Exporting to Neo4j[/bold magenta]")
-        console.log("Attempting to export the enriched graph to Neo4j...")
-        neo4j_manager = get_neo4j_manager_from_env()
-        if neo4j_manager and neo4j_manager.driver:
-            try:
-                neo4j_manager.export_graph_to_neo4j(profiling_agent.graph)
-                console.log("[bold green]Graph successfully exported to Neo4j.[/bold green]")
-            except Exception as e:
-                console.print(f"[bold red]Failed to export graph to Neo4j. Error: {e}[/bold red]")
-            finally:
-                neo4j_manager.close()
+        console.rule("[bold blue]Exporting to Neo4j[/bold blue]")
+        knowledge_base = _load_knowledge_base()
+        neo4j_config = knowledge_base.get('neo4j')
+        
+        # *** THIS IS THE FIX ***
+        # Check if the Neo4j configuration exists before trying to connect.
+        if not neo4j_config:
+            console.print("[bold red]Error: 'neo4j' configuration not found in knowledge_base.yaml.[/bold red]")
         else:
-            console.print("[bold red]Cannot export to Neo4j. Ensure NEO4J_PASSWORD is set and the service is running.[/bold red]")
+            try:
+                # Pass the credentials to the Neo4jManager
+                neo4j_manager = Neo4jManager(
+                    uri=neo4j_config.get('uri'),
+                    user=neo4j_config.get('user'),
+                    password=neo4j_config.get('password')
+                )
+                neo4j_manager.export_graph(profiling_agent.graph)
+                neo4j_manager.close()
+                console.print("[green]Successfully exported graph to Neo4j.[/green]")
+            except Exception as e:
+                console.print(f"[bold red]Failed to export to Neo4j: {e}[/bold red]")
+                console.print("Please ensure Neo4j is running and credentials in 'knowledge_base.yaml' are correct.")
 
     db_manager.close()
-    console.rule("[bold green]Assessment Complete[/bold green]")
 
 if __name__ == "__main__":
     app()

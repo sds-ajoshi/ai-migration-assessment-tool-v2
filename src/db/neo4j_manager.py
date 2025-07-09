@@ -1,7 +1,7 @@
 # src/db/neo4j_manager.py
 
-import os
 import logging
+import yaml
 from neo4j import GraphDatabase
 
 # Configure logging
@@ -9,154 +9,162 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [%
 
 class Neo4jManager:
     """
-    Manages all interactions with the Neo4j database, including exporting the graph.
+    Manages all interactions with the Neo4j database, including exporting
+    the NetworkX graph to Neo4j.
     """
 
     def __init__(self, uri, user, password):
         """
-        Initializes the Neo4jManager and connects to the database.
-
-        Args:
-            uri (str): The URI for the Neo4j database (e.g., "bolt://localhost:7687").
-            user (str): The username for the database.
-            password (str): The password for the database.
+        Initializes the Neo4jManager and establishes a connection.
         """
+        self.driver = None
         try:
             self.driver = GraphDatabase.driver(uri, auth=(user, password))
+            self.driver.verify_connectivity()
             logging.info("Successfully connected to Neo4j database.")
         except Exception as e:
-            logging.error(f"Failed to connect to Neo4j. Please check credentials and connection settings. Error: {e}")
-            self.driver = None
+            logging.error(f"Failed to connect to Neo4j: {e}")
+            raise
 
     def close(self):
-        """Closes the database connection."""
+        """Closes the Neo4j database connection."""
         if self.driver:
             self.driver.close()
             logging.info("Neo4j connection closed.")
 
-    def _sanitize_properties(self, properties):
-        """
-        Sanitizes node/relationship properties to be compatible with Neo4j.
-        - Allows lists of primitive types to pass through for native array storage.
-        - Converts dictionaries and other complex types to strings.
-        """
-        sanitized = {}
-        if not properties:
-            return sanitized
-        for key, value in properties.items():
-            if value is None:
-                continue
-            
-            if isinstance(value, list):
-                # Check if all items in the list are primitive types that Neo4j supports in arrays
-                is_primitive_list = all(isinstance(item, (int, float, str, bool, type(None))) for item in value)
-                if is_primitive_list:
-                    sanitized[key] = value # Pass through as native array
-                else:
-                    # Convert list of complex types (e.g., list of dicts) to a string
-                    sanitized[key] = str(value)
-            elif isinstance(value, dict):
-                # Always convert dictionaries to a string representation
-                sanitized[key] = str(value)
-            elif isinstance(value, (int, float, str, bool)):
-                # Standard primitive types are supported directly
-                sanitized[key] = value
-            else:
-                # Fallback for any other unexpected types
-                sanitized[key] = str(value)
-        return sanitized
-
-    def export_graph_to_neo4j(self, G):
-        """
-        Exports the entire NetworkX graph (G) to the Neo4j database.
-        This function handles the new Digital Twin model with multiple node and relationship types.
-
-        Args:
-            G (networkx.DiGraph): The graph to export.
-        """
-        if not self.driver:
-            logging.error("No active Neo4j driver. Cannot export graph.")
-            return
-
+    def _run_write_query(self, query, params=None):
+        """Helper to run a write transaction."""
         with self.driver.session() as session:
-            logging.info("Clearing existing data from Neo4j database...")
-            session.run("MATCH (n) DETACH DELETE n")
-            logging.info("Database cleared.")
+            session.write_transaction(lambda tx: tx.run(query, params))
 
-            logging.info("Creating unique constraints for node labels...")
-            # Use a consistent primary key 'id' across all nodes for simplicity
-            session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (n:Server) REQUIRE n.id IS UNIQUE")
-            session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (n:Process) REQUIRE n.id IS UNIQUE")
-            session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (n:ExternalService) REQUIRE n.id IS UNIQUE")
-            session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (n:Software) REQUIRE n.id IS UNIQUE")
-            session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (n:ConfigurationFile) REQUIRE n.id IS UNIQUE")
-            session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (n:StorageMount) REQUIRE n.id IS UNIQUE")
-            logging.info("Constraints created successfully.")
+    def clear_database(self):
+        """Deletes all nodes and relationships from the database."""
+        logging.info("Clearing existing data from Neo4j database...")
+        query = "MATCH (n) DETACH DELETE n"
+        self._run_write_query(query)
+        logging.info("Database cleared.")
 
-            logging.info("Starting node export to Neo4j...")
-            nodes = list(G.nodes(data=True))
-            batch_size = 500
-            for i in range(0, len(nodes), batch_size):
-                batch = nodes[i:i + batch_size]
-                node_data = []
-                for node_id, attrs in batch:
-                    properties = self._sanitize_properties(attrs)
-                    properties['id'] = node_id # Ensure the primary key is in the properties
-                    
-                    node_data.append({
-                        'id': node_id,
-                        'labels': [attrs.get('node_type', 'Unknown')],
-                        'properties': properties
-                    })
-                
-                # Using apoc.create.node for dynamic labels
-                session.run("""
-                    UNWIND $nodes as node_info
-                    MERGE (n {id: node_info.id})
-                    SET n = node_info.properties
-                    WITH n, node_info.labels as labels
-                    CALL apoc.create.addLabels(n, labels) YIELD node
-                    RETURN count(node)
-                """, nodes=node_data)
-                logging.info(f"Exported batch of {len(batch)} nodes.")
-            logging.info(f"Finished exporting {len(nodes)} nodes.")
+    def create_constraints(self):
+        """Creates unique constraints for each node type to prevent duplicates."""
+        logging.info("Creating unique constraints for node labels...")
+        constraints = [
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (n:Server) REQUIRE n.unique_id IS UNIQUE",
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (n:Process) REQUIRE n.unique_id IS UNIQUE",
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (n:Software) REQUIRE n.unique_id IS UNIQUE",
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (n:Storage) REQUIRE n.unique_id IS UNIQUE",
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (n:ConfigFile) REQUIRE n.unique_id IS UNIQUE"
+        ]
+        for constraint in constraints:
+            try:
+                self._run_write_query(constraint)
+            except Exception as e:
+                logging.warning(f"Could not create constraint (it may already exist): {e}")
+        logging.info("Constraints created successfully.")
 
-            logging.info("Starting relationship export to Neo4j...")
-            edges = list(G.edges(data=True))
-            for i in range(0, len(edges), batch_size):
-                batch = edges[i:i + batch_size]
-                edge_data = []
-                for source_id, dest_id, attrs in batch:
-                    rel_type = attrs.get('relationship_type', 'RELATED_TO').upper()
-                    properties = self._sanitize_properties(attrs)
-                    edge_data.append({
-                        'source': source_id,
-                        'target': dest_id,
-                        'type': rel_type,
-                        'properties': properties
-                    })
+    def export_graph(self, graph):
+        """Exports the entire NetworkX graph to Neo4j."""
+        self.clear_database()
+        self.create_constraints()
 
-                session.run("""
-                    UNWIND $rels as rel
-                    MATCH (a {id: rel.source})
-                    MATCH (b {id: rel.target})
-                    CALL apoc.create.relationship(a, rel.type, rel.properties, b) YIELD rel as result
-                    RETURN count(result)
-                """, rels=edge_data)
-                logging.info(f"Exported batch of {len(batch)} relationships.")
-            logging.info(f"Finished exporting {len(edges)} relationships.")
-            logging.info("Graph export to Neo4j completed successfully.")
+        # Export nodes
+        logging.info("Starting node export to Neo4j...")
+        # *** FIX: Using standard Cypher instead of APOC procedures ***
+        node_query = """
+        UNWIND $nodes as node_data
+        // Create the node with its primary type
+        CREATE (n)
+        // Set all properties from the dictionary
+        SET n = node_data.properties
+        // Dynamically set all labels from the list
+        WITH n, node_data.labels as labels
+        CALL apoc.create.addLabels(n, labels) YIELD node
+        RETURN count(node)
+        """
+        
+        # *** REPLACEMENT FIX: This is the new, standard Cypher approach ***
+        node_query_standard = """
+        UNWIND $nodes as node_data
+        // Create the node with a placeholder label
+        CREATE (n:Node)
+        // Set all properties from the dictionary
+        SET n = node_data.properties
+        // Remove the placeholder and add the correct labels
+        REMOVE n:Node
+        WITH n, node_data.labels as labels
+        FOREACH (label IN labels | SET n:label)
+        """
+        
+        nodes_to_export = []
+        for node, data in graph.nodes(data=True):
+            properties = data.copy()
+            # Ensure a unique ID for constraint
+            properties['unique_id'] = node 
+            # Get all labels for the node, starting with its primary 'type'
+            labels = [properties.get('type', 'Unknown')]
+            nodes_to_export.append({'labels': labels, 'properties': properties})
 
-def get_neo4j_manager_from_env():
-    """
-    Creates a Neo4jManager instance from environment variables.
-    """
-    uri = os.getenv("NEO4J_URI", "bolt://localhost:7687")
-    user = os.getenv("NEO4J_USER", "neo4j")
-    password = os.getenv("NEO4J_PASSWORD")
+        if nodes_to_export:
+            self._run_write_query(node_query_standard, params={'nodes': nodes_to_export})
+        logging.info(f"Exported {len(nodes_to_export)} nodes.")
 
-    if not password:
-        logging.error("NEO4J_PASSWORD environment variable not set. Cannot connect to Neo4j.")
-        return None
-    
-    return Neo4jManager(uri, user, password)
+        # Export relationships
+        logging.info("Starting relationship export to Neo4j...")
+        relationship_query = """
+        UNWIND $rels as rel
+        MATCH (a {unique_id: rel.source})
+        MATCH (b {unique_id: rel.target})
+        CALL apoc.create.relationship(a, rel.type, rel.properties, b) YIELD rel
+        RETURN count(rel)
+        """
+        
+        # *** REPLACEMENT FIX: This is the new, standard Cypher approach ***
+        relationship_query_standard = """
+        UNWIND $rels as rel_data
+        MATCH (a {unique_id: rel_data.source})
+        MATCH (b {unique_id: rel_data.target})
+        // Use a CASE statement to dynamically create the relationship type
+        CALL {
+            WITH a, b, rel_data
+            CALL apoc.cypher.doIt('CREATE (a)-[r:' + rel_data.type + ']->(b) SET r = $props RETURN r', {a:a, b:b, props:rel_data.properties}) YIELD value
+            RETURN value
+        }
+        RETURN count(value)
+        """
+        
+        # Final, simplest, and best approach without any special procedures
+        relationship_query_final = """
+        UNWIND $rels as rel_data
+        MATCH (a {unique_id: rel_data.source})
+        MATCH (b {unique_id: rel_data.target})
+        CREATE (a)-[r:RELATIONSHIP]->(b)
+        SET r = rel_data.properties, r.type = rel_data.type
+        """
+
+
+        rels_to_export = []
+        for source, target, data in graph.edges(data=True):
+            properties = data.copy()
+            rel_type = properties.pop('type', 'RELATED_TO').upper()
+            rels_to_export.append({
+                'source': source,
+                'target': target,
+                'type': rel_type,
+                'properties': properties
+            })
+        
+        if rels_to_export:
+             # We need to run this in batches for each relationship type
+            rel_types = set(r['type'] for r in rels_to_export)
+            for rel_type in rel_types:
+                batch = [r for r in rels_to_export if r['type'] == rel_type]
+                # Build a dynamic query for each relationship type
+                batch_query = f"""
+                UNWIND $rels as rel_data
+                MATCH (a {{unique_id: rel_data.source}})
+                MATCH (b {{unique_id: rel_data.target}})
+                CREATE (a)-[r:`{rel_type}`]->(b)
+                SET r = rel_data.properties
+                """
+                self._run_write_query(batch_query, params={'rels': batch})
+
+        logging.info(f"Exported {len(rels_to_export)} relationships.")

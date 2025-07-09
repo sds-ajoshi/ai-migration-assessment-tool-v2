@@ -1,19 +1,5 @@
-──────────────────────────────────────────────────────────────────────────────────────────────── AI-Powered Migration Assessment Tool ────────────────────────────────────────────────────────────────────────────────────────────────
-[03:40:23] Using database file: assessment_history.db                                                                                                                                                                       main.py:67
-           Starting data ingestion from inventory 'inventory.csv' with 10 workers...                                                                                                                                        main.py:71
-Loaded and validated 4 hosts from 'inventory.csv'.
-  Discovering hosts... ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100% 0:00:00
-────────────────────────────────────────────────────────────────────────────────────────────────────────── Persisting Data ───────────────────────────────────────────────────────────────────────────────────────────────────────────
-Data persistence complete.
-[03:40:56] Data ingestion complete.                                                                                                                                                                                         main.py:74
-────────────────────────────────────────────────────────────────────────────────────────── Phase 2: Analysis and Digital Twin Construction ───────────────────────────────────────────────────────────────────────────────────────────
-           Building base dependency graph...                                                                                                                                                                                main.py:80
-[03:40:57] Base dependency graph built successfully with 4 nodes and 0 edges.                                                                                                                                               main.py:86
-           Correlating and enriching graph to create Digital Twin...                                                                                                                                                        main.py:88
-           Digital Twin enrichment complete.                                                                                                                                                                                main.py:90
-           Finding application clusters from enriched graph...                                                                                                                                                              main.py:92
-           No distinct application clusters found.                                                                                                                                                                          main.py:97
-           Identifying external dependencies...                                                                                                                                                                             main.py:99
-───────────────────────────────────────────────────────────────────────────────────────────────────── Assessment Summary Report ──────────────────────────────────────────────────────────────────────────────────────────────────────
-No external dependencies found.
-──────────────────────────────────────────────────────────────────────────────────────────────────────── Assessment Complete ─────────────────────────────────────────────────────────────────────────────────────────────────────────
+                                                                                                                                                                                                                                      
+ Usage: main.py [OPTIONS] COMMAND [ARGS]...                                                                                                                                                                                           
+                                                                                                                                                                                                                                      
+ An AI-Powered Migration Assessment Tool that discovers your IT landscape, builds a Digital Twin, and provides intelligent migration recommendations.                                                                                 
+                                                                                                                                                                                                                                      

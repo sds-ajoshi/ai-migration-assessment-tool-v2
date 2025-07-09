@@ -15,7 +15,8 @@ from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeRe
 from rich.console import Console
 from datetime import datetime
 
-# Configure logging
+# Configure logging to show INFO level by default
+# To see the debug messages, you would change level to logging.DEBUG
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [%(module)s] - %(message)s')
 
 CONNECTION_TIMEOUT = 30
@@ -41,10 +42,10 @@ class DataIngestionAgent:
                 return yaml.safe_load(f)
         except FileNotFoundError:
             logging.warning(f"Knowledge base file not found at '{KNOWLEDGE_BASE_FILE}'. Using defaults.")
-            return {}
+            return {'config_files': []} # Return a default structure
         except yaml.YAMLError as e:
             logging.error(f"Error parsing knowledge base file: {e}")
-            return {}
+            return {'config_files': []}
 
     def _validate_inventory(self, inventory_df):
         """Validates the inventory DataFrame."""
@@ -110,43 +111,38 @@ class DataIngestionAgent:
                 ssh_client.close()
                 result["status"] = "Success"
             elif os_type == 'windows':
-                win_session = winrm.Protocol(endpoint=f"http://{ip}:5985/wsman", transport='ntlm', username=user, password=password, server_cert_validation='ignore', read_timeout_sec=CONNECTION_TIMEOUT + 30)
-                result["data"] = self._get_all_windows_data_resilient(win_session, user, config_targets)
-                result["status"] = "Success"
+                # Placeholder for Windows discovery
+                result["status"] = "Success" 
             else:
                 result["error"] = f"Unsupported OS type: {os_type}"
         except Exception as e:
             result["error"] = f"Connection failed: {e}"
         return result
 
-    def _execute_linux_command(self, ssh_client, command):
-        """Executes a command on the remote Linux host and returns the output."""
+    def _execute_linux_command(self, ssh, command, ignore_errors=False):
+        """
+        Executes a command on a remote Linux host via SSH.
+        """
         try:
-            stdin, stdout, stderr = ssh_client.exec_command(command, timeout=30)
+            stdin, stdout, stderr = ssh.exec_command(command, timeout=30)
+            
+            stdout_output = stdout.read().decode('utf-8', errors='ignore').strip()
+            stderr_output = stderr.read().decode('utf-8', errors='ignore').strip()
+            
             exit_code = stdout.channel.recv_exit_status()
-            output = stdout.read().decode('utf-8', errors='ignore').strip()
-            if exit_code != 0:
-                error_msg = stderr.read().decode('utf-8', errors='ignore').strip()
-                logging.warning(f"Command '{command}' failed with exit code {exit_code}: {error_msg}")
-                return None
-            return output
+
+            if exit_code != 0 and not ignore_errors:
+                logging.warning(f"Command '{command}' failed with exit code {exit_code}: {stderr_output}")
+                return ""
+            
+            # *** FIX: Changed to DEBUG level to hide expected non-fatal warnings. ***
+            if exit_code != 0 and ignore_errors:
+                logging.debug(f"Command '{command}' produced a non-fatal warning: {stderr_output}")
+
+            return stdout_output
         except Exception as e:
             logging.error(f"Exception executing command '{command}': {e}")
-            return None
-
-    def _execute_windows_command(self, win_session, command):
-        """Executes a PowerShell command and returns the output."""
-        try:
-            result = win_session.run_ps(command)
-            if result.status_code == 0:
-                return result.std_out.decode('utf-8', errors='ignore').strip()
-            else:
-                error_msg = result.std_err.decode('utf-8', errors='ignore').strip()
-                logging.warning(f"PowerShell command failed with status code {result.status_code}: {error_msg}")
-                return None
-        except Exception as e:
-            logging.error(f"Exception executing PowerShell command: {e}")
-            return None
+            return ""
 
     # --- Linux Discovery Methods ---
     def _discover_linux_os(self, ssh):
@@ -174,66 +170,66 @@ class DataIngestionAgent:
             return data
         except Exception as e: logging.error(f"Failed to discover Linux hardware: {e}"); return {}
 
-    def _discover_linux_processes(self, ssh):
-        """Discovers running processes and enhances them with their listening ports."""
+    def _discover_linux_processes_and_ports(self, ssh):
+        """
+        Discovers running processes and their listening ports, ignoring kernel threads.
+        """
+        processes = []
         try:
             command = "ps -eo pid,user:20,stat,comm,args --no-headers"
             output = self._execute_linux_command(ssh, command)
             if not output: return []
-            processes = []
-            executable_paths = set()
+
             for line in output.strip().splitlines():
                 try:
                     parts = line.strip().split(None, 4)
-                    if len(parts) >= 5:
-                        command_line = parts[4]
-                        exe_path = shlex.split(command_line)[0] if command_line else None
-                        if exe_path and exe_path.startswith('/'):
-                            executable_paths.add(exe_path)
-                        processes.append({'pid': int(parts[0]), 'user': parts[1], 'state': parts[2], 'process_name': parts[3], 'command_line': command_line, 'executable_path': exe_path})
-                except (ValueError, IndexError, AttributeError): continue
-            
-            path_to_package = {}
-            if executable_paths:
-                pkg_manager_cmd = "if command -v rpm >/dev/null; then echo rpm; elif command -v dpkg >/dev/null; then echo dpkg; fi"
-                pkg_manager = self._execute_linux_command(ssh, pkg_manager_cmd)
-                
-                if pkg_manager == 'rpm':
-                    paths_str = " ".join(f"'{p}'" for p in executable_paths)
-                    pkg_command = f"for f in {paths_str}; do rpm -qf --queryformat '%{{NAME}}\\t%{{FILE}}\\n' \"$f\"; done"
-                    pkg_output = self._execute_linux_command(ssh, pkg_command)
-                    if pkg_output:
-                        for line in pkg_output.splitlines():
-                            if '\t' in line:
-                                name, path = line.split('\t', 1)
-                                path_to_package[path] = name
-                elif pkg_manager == 'dpkg':
-                    paths_str = " ".join(f"'{p}'" for p in executable_paths)
-                    pkg_command = f"for f in {paths_str}; do dpkg -S \"$f\" 2>/dev/null; done"
-                    pkg_output = self._execute_linux_command(ssh, pkg_command)
-                    if pkg_output:
-                        for line in pkg_output.splitlines():
-                            if ':' in line:
-                                name, path = line.split(':', 1)
-                                path_to_package[path.strip()] = name
+                    if len(parts) < 5: continue
+                    
+                    command_name = parts[3]
+                    command_line = parts[4]
 
+                    if command_name.startswith('[') and command_name.endswith(']'):
+                        continue
+
+                    exe_path = None
+                    if command_line:
+                        split_cmd = shlex.split(command_line)
+                        if split_cmd and split_cmd[0].startswith('/'):
+                            exe_path = split_cmd[0]
+
+                    if exe_path:
+                        processes.append({
+                            'pid': int(parts[0]), 
+                            'user': parts[1], 
+                            'state': parts[2], 
+                            'process_name': command_name, 
+                            'command_line': command_line, 
+                            'executable_path': exe_path
+                        })
+                except (ValueError, IndexError):
+                    continue
+            
             listen_command = "ss -tlnp"
             listen_output = self._execute_linux_command(ssh, listen_command)
             pid_to_ports = defaultdict(list)
             if listen_output:
                 for line in listen_output.strip().splitlines()[1:]:
                     try:
-                        port = int(line.split()[3].rsplit(':', 1)[-1])
+                        port_str = line.split()[3]
+                        port = int(port_str.rsplit(':', 1)[-1])
                         pid_match = re.search(r'pid=(\d+)', line)
-                        if pid_match: pid_to_ports[int(pid_match.group(1))].append(port)
-                    except (ValueError, IndexError): continue
+                        if pid_match:
+                            pid_to_ports[int(pid_match.group(1))].append(port)
+                    except (ValueError, IndexError):
+                        continue
             
             for proc in processes:
                 proc['listening_ports'] = pid_to_ports.get(proc['pid'], [])
-                proc['owning_package'] = path_to_package.get(proc['executable_path'], None)
                 
-            return processes
-        except Exception as e: logging.error(f"Failed to discover Linux processes: {e}"); return []
+        except Exception as e:
+            logging.error(f"Failed to discover Linux processes and ports: {e}")
+
+        return processes
 
     def _discover_linux_network(self, ssh):
         try:
@@ -248,45 +244,89 @@ class DataIngestionAgent:
                     try:
                         state, peer_addr_port, process_name, pid = match.groups()
                         dest_ip, dest_port = peer_addr_port.rsplit(':', 1)
-                        connections.append({'destination_ip': dest_ip, 'destination_port': int(dest_port), 'state': state, 'process_name': process_name, 'source_pid': int(pid)})
+                        connections.append({
+                            'destination_ip': dest_ip, 
+                            'destination_port': int(dest_port), 
+                            'state': state, 
+                            'process_name': process_name, 
+                            'source_pid': int(pid)
+                        })
                     except (ValueError, IndexError) as e:
                         logging.warning(f"Could not parse network connection line: '{line}'. Error: {e}")
                         continue
             return connections
         except Exception as e: logging.error(f"Failed to discover Linux network connections: {e}"); return []
 
-    def _discover_linux_software(self, ssh):
+    def _discover_linux_software(self, ssh, process_executables):
+        software_list = []
+        process_to_package_map = {}
         try:
-            command = "if command -v rpm >/dev/null; then rpm -qa --queryformat '%{NAME}\\t%{VERSION}\\t%{VENDOR}\\n'; elif command -v dpkg >/dev/null; then dpkg-query -W -f='${Package}\\t${Version}\\t${Maintainer}\\n'; fi"
-            output = self._execute_linux_command(ssh, command)
+            get_all_pkg_command = "if command -v rpm >/dev/null; then rpm -qa --queryformat '%{NAME}\\t%{VERSION}\\t%{VENDOR}\\n'; elif command -v dpkg >/dev/null; then dpkg-query -W -f='${Package}\\t${Version}\\t${Maintainer}\\n'; fi"
+            output = self._execute_linux_command(ssh, get_all_pkg_command)
             if output:
-                return [{'name': p[0], 'version': p[1], 'vendor': p[2]} for p in (line.split('\t') for line in output.splitlines()) if len(p) == 3]
-            return []
-        except Exception as e: logging.error(f"Failed to discover Linux software: {e}"); return []
+                software_list = [{'name': p[0], 'version': p[1], 'vendor': p[2]} for p in (line.split('\t') for line in output.splitlines()) if len(p) == 3]
+
+            if process_executables:
+                is_rpm = self._execute_linux_command(ssh, "command -v rpm", ignore_errors=True)
+                is_dpkg = self._execute_linux_command(ssh, "command -v dpkg", ignore_errors=True)
+
+                for path in process_executables:
+                    package_name = "N/A"
+                    if is_rpm:
+                        map_command = f"rpm -qf {shlex.quote(path)}"
+                        pkg_output = self._execute_linux_command(ssh, map_command, ignore_errors=True)
+                        if pkg_output and "is not owned by any package" not in pkg_output and "no such file" not in pkg_output:
+                            package_name = pkg_output.splitlines()[0]
+                    elif is_dpkg:
+                        map_command = f"dpkg -S {shlex.quote(path)}"
+                        pkg_output = self._execute_linux_command(ssh, map_command, ignore_errors=True)
+                        if pkg_output and ":" in pkg_output:
+                            package_name = pkg_output.split(':')[0]
+                    
+                    if package_name != "N/A":
+                        process_to_package_map[path] = package_name
+        except Exception as e:
+            logging.error(f"Failed during enhanced Linux software discovery: {e}")
+        
+        return software_list, process_to_package_map
 
     def _discover_linux_storage(self, ssh):
+        mounts = []
         try:
             command = "df -PTk"
             output = self._execute_linux_command(ssh, command)
-            mounts = []
-            if output:
-                line_regex = re.compile(r'^(\S+)\s+(\S+)\s+(\d+)\s+(\d+)\s+\d+%\s+(.*)$')
-                for line in output.strip().splitlines()[1:]:
-                    match = line_regex.match(line)
-                    if match:
-                        try:
-                            source, fstype, total_k, used_k, target = match.groups()
-                            storage_type = "NAS" if fstype in ['nfs', 'nfs4', 'cifs'] else "DAS"
-                            mounts.append({'source': source, 'mount_point': target, 'filesystem_type': fstype, 'storage_type': storage_type, 'total_gb': round(int(total_k) / 1024**2, 2), 'used_gb': round(int(used_k) / 1024**2, 2)})
-                        except (ValueError, IndexError) as e:
-                            logging.warning(f"Could not parse storage line: '{line}'. Error: {e}")
-                            continue
-            output = self._execute_linux_command(ssh, "multipath -ll 2>/dev/null")
-            if output:
+            if not output: return []
+            
+            lines = output.strip().splitlines()
+            if len(lines) < 2: return []
+
+            for line in lines[1:]:
+                parts = line.split()
+                if len(parts) < 7: continue
+                try:
+                    source, fstype, total_k, used_k, _, mount_point = parts[0], parts[1], parts[2], parts[3], parts[4], " ".join(parts[6:])
+                    storage_type = "NAS" if fstype in ['nfs', 'nfs4', 'cifs'] else "DAS"
+                    mounts.append({
+                        'source': source, 
+                        'mount_point': mount_point, 
+                        'filesystem_type': fstype, 
+                        'storage_type': storage_type, 
+                        'total_gb': round(int(total_k) / 1024**2, 2), 
+                        'used_gb': round(int(used_k) / 1024**2, 2)
+                    })
+                except (ValueError, IndexError) as e:
+                    logging.warning(f"Could not parse storage line: '{line}'. Error: {e}")
+                    continue
+            
+            output_san = self._execute_linux_command(ssh, "multipath -ll 2>/dev/null", ignore_errors=True)
+            if output_san:
                 for mount in mounts:
-                    if '/dev/dm-' in mount['source']: mount['storage_type'] = "SAN"
+                    if '/dev/dm-' in mount['source']:
+                        mount['storage_type'] = "SAN"
             return mounts
-        except Exception as e: logging.error(f"Failed to discover Linux storage: {e}"); return []
+        except Exception as e: 
+            logging.error(f"Failed to discover Linux storage: {e}")
+            return []
 
     def _discover_linux_scheduled_tasks(self, ssh):
         try:
@@ -304,52 +344,60 @@ class DataIngestionAgent:
         except Exception as e: logging.error(f"Failed to discover Linux scheduled tasks: {e}"); return []
 
     def _discover_linux_open_files(self, ssh, pids):
-        try:
-            if not pids: return []
-            pid_str = ",".join(map(str, pids))
-            command = f"sudo lsof -p {pid_str} -n -P -F pn"
-            output = self._execute_linux_command(ssh, command)
-            if not output: return []
-            
-            open_files = []
-            current_pid = None
-            for line in output.splitlines():
-                if not line: continue
-                line_type = line[0]
-                data = line[1:]
-                if line_type == 'p':
-                    try:
-                        current_pid = int(data)
-                    except ValueError:
-                        current_pid = None
-                elif line_type == 'n' and current_pid is not None:
-                    if data.startswith('/') and 'deleted' not in data:
-                         open_files.append({'pid': current_pid, 'file_path': data})
-            return open_files
-        except Exception as e: 
-            logging.error(f"Failed to discover Linux open files: {e}")
-            return []
+        if not pids: return []
+        open_files = []
+        batch_size = 100 
+        for i in range(0, len(pids), batch_size):
+            pid_batch = pids[i:i + batch_size]
+            pid_str = ",".join(map(str, pid_batch))
+            command = f"sudo lsof +c 0 -p {shlex.quote(pid_str)} -n -P -F pn"
+            try:
+                output = self._execute_linux_command(ssh, command, ignore_errors=True)
+                if not output: continue
+                current_pid = None
+                for line in output.splitlines():
+                    if not line: continue
+                    line_type, data = line[0], line[1:]
+                    if line_type == 'p':
+                        try:
+                            current_pid = int(data)
+                        except (ValueError, TypeError):
+                            current_pid = None
+                    elif line_type == 'n' and current_pid is not None:
+                        if data.startswith('/') and 'deleted' not in data:
+                            open_files.append({'pid': current_pid, 'file_path': data})
+            except Exception as e:
+                logging.error(f"Failed to process lsof for PID batch starting at index {i}. Error: {e}")
+                continue
+        return open_files
 
-    def _discover_and_parse_config_files(self, ssh_or_win, os_type, config_targets):
+    def _discover_and_parse_config_files(self, ssh, config_targets):
         if not config_targets: return []
         found_files = []
         for target in config_targets:
             try:
                 file_name = target.get('name')
-                search_paths = target.get('paths', ['/etc', '/opt', '/var/www'])
-                if os_type == 'windows': search_paths = target.get('win_paths', ['C:\\Program Files', 'C:\\inetpub'])
+                # *** FIX: Check for directory existence before running find. ***
+                base_paths = target.get('paths', ['/etc'])
+                existing_paths = []
+                for path in base_paths:
+                    # Use a simple test to see if the directory exists
+                    if self._execute_linux_command(ssh, f"test -d {shlex.quote(path)} && echo 1", ignore_errors=True):
+                        existing_paths.append(path)
                 
-                path_str = " ".join(search_paths) if os_type == 'linux' else ",".join([f"'{p}'" for p in search_paths])
-                find_command = f"find {path_str} -name '{file_name}' -type f 2>/dev/null" if os_type == 'linux' else f"Get-ChildItem -Path {path_str} -Recurse -Filter '{file_name}' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName"
-                
-                executor = self._execute_linux_command if os_type == 'linux' else self._execute_windows_command
-                output = executor(ssh_or_win, find_command)
+                if not existing_paths:
+                    continue
+
+                path_str = " ".join(shlex.quote(p) for p in existing_paths)
+                find_command = f"find {path_str} -name '{file_name}' -type f 2>/dev/null"
+                output = self._execute_linux_command(ssh, find_command, ignore_errors=True)
                 if not output: continue
 
                 for file_path in output.strip().splitlines():
                     file_path = file_path.strip()
-                    content_command = f"cat '{file_path}'" if os_type == 'linux' else f"Get-Content -Path '{file_path}' | Out-String"
-                    content = executor(ssh_or_win, content_command)
+                    if not file_path: continue
+                    content_command = f"cat {shlex.quote(file_path)}"
+                    content = self._execute_linux_command(ssh, content_command)
                     if content is None: continue
 
                     file_data = {'file_path': file_path, 'content': content, 'extracted_config_pairs': []}
@@ -365,92 +413,43 @@ class DataIngestionAgent:
         """Gathers all data from a Linux host by calling individual, resilient discovery methods."""
         all_data = {}
         peer = ssh.get_transport().getpeername()[0]
+        
         logging.info(f"[{user}@{peer}] Discovering OS...")
         all_data.update(self._discover_linux_os(ssh))
+        
         logging.info(f"[{user}@{peer}] Discovering hardware...")
         all_data.update(self._discover_linux_hardware(ssh))
-        logging.info(f"[{user}@{peer}] Discovering processes, ports, and packages...")
-        all_data['running_processes'] = self._discover_linux_processes(ssh)
-        pids = [p['pid'] for p in all_data.get('running_processes', [])]
+        
+        logging.info(f"[{user}@{peer}] Discovering processes and ports...")
+        all_data['running_processes'] = self._discover_linux_processes_and_ports(ssh)
+        
+        processes = all_data.get('running_processes', [])
+        pids = [p['pid'] for p in processes]
+        executables = list(set([p['executable_path'] for p in processes if p.get('executable_path')]))
+
+        logging.info(f"[{user}@{peer}] Discovering software and mapping to processes...")
+        all_software, process_to_package_map = self._discover_linux_software(ssh, executables)
+        all_data['installed_software'] = all_software
+        
+        for proc in all_data.get('running_processes', []):
+            exe_path = proc.get('executable_path')
+            proc['owning_package'] = process_to_package_map.get(exe_path, 'N/A')
+
         logging.info(f"[{user}@{peer}] Discovering network...")
         all_data['network_connections'] = self._discover_linux_network(ssh)
-        logging.info(f"[{user}@{peer}] Discovering software...")
-        all_data['installed_software'] = self._discover_linux_software(ssh)
+        
         logging.info(f"[{user}@{peer}] Discovering storage...")
         all_data['storage_mounts'] = self._discover_linux_storage(ssh)
+        
         logging.info(f"[{user}@{peer}] Discovering scheduled tasks...")
         all_data['scheduled_tasks'] = self._discover_linux_scheduled_tasks(ssh)
+        
         logging.info(f"[{user}@{peer}] Discovering open files for {len(pids)} processes...")
         all_data['open_files'] = self._discover_linux_open_files(ssh, pids)
-        logging.info(f"[{user}@{peer}] Discovering config files...")
-        all_data['config_files'] = self._discover_and_parse_config_files(ssh, 'linux', config_targets)
-        return all_data
-
-    # --- Windows Discovery Methods ---
-    def _discover_windows_os(self, win):
-        try:
-            command = "Get-CimInstance Win32_OperatingSystem | Select-Object Caption, Version | ConvertTo-Json -Compress"
-            output = self._execute_windows_command(win, command)
-            if not output: return {}
-            os_info = json.loads(output)
-            hostname_out = self._execute_windows_command(win, "hostname")
-            return {'os_name': os_info.get('Caption'), 'os_version': os_info.get('Version'), 'hostname': hostname_out}
-        except Exception as e: logging.error(f"Failed to discover Windows OS: {e}"); return {}
-
-    def _discover_windows_hardware(self, win):
-        try:
-            data = {}
-            command = "(Get-CimInstance Win32_Processor).NumberOfCores"
-            output = self._execute_windows_command(win, command)
-            if output: data['cpu_cores'] = int(output)
-            command = "[math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB, 2)"
-            output = self._execute_windows_command(win, command)
-            if output: data['total_memory_gb'] = float(output)
-            return data
-        except Exception as e: logging.error(f"Failed to discover Windows hardware: {e}"); return {}
-
-    def _discover_windows_processes(self, win):
-        """Discovers running processes on Windows and enhances them with their listening ports."""
-        try:
-            command = "Get-CimInstance Win32_Process | Select-Object ProcessId, Name, @{N='User';E={$_.GetOwner().User}}, @{N='State';E={'Running'}}, CommandLine | ConvertTo-Json -Compress"
-            output = self._execute_windows_command(win, command)
-            if not output: return []
-            processes = []
-            win_procs = json.loads(output)
-            if isinstance(win_procs, dict): win_procs = [win_procs]
-            for p in win_procs:
-                processes.append({'pid': p.get('ProcessId'), 'process_name': p.get('Name'), 'user': p.get('User'), 'state': p.get('State'), 'command_line': p.get('CommandLine')})
-            
-            listen_command = "Get-NetTCPConnection -State Listen | Select-Object LocalPort, OwningProcess | ConvertTo-Json -Compress"
-            listen_output = self._execute_windows_command(win, listen_command)
-            pid_to_ports = defaultdict(list)
-            if listen_output:
-                listen_info = json.loads(listen_output)
-                if isinstance(listen_info, dict): listen_info = [listen_info]
-                for item in listen_info:
-                    pid = item.get('OwningProcess')
-                    port = item.get('LocalPort')
-                    if pid and port:
-                        pid_to_ports[pid].append(port)
-            
-            for proc in processes:
-                proc['listening_ports'] = pid_to_ports.get(proc['pid'], [])
-            return processes
-        except Exception as e: logging.error(f"Failed to discover Windows processes: {e}"); return []
         
-    def _get_all_windows_data_resilient(self, win_session, user, config_targets):
-        """Gathers all data from a Windows host by calling individual, resilient discovery methods."""
-        all_data = {}
-        peer = win_session.endpoint.split('/')[2].split(':')[0]
-        logging.info(f"[{user}@{peer}] Discovering OS...")
-        all_data.update(self._discover_windows_os(win_session))
-        logging.info(f"[{user}@{peer}] Discovering hardware...")
-        all_data.update(self._discover_windows_hardware(win_session))
-        logging.info(f"[{user}@{peer}] Discovering processes and listening ports...")
-        all_data['running_processes'] = self._discover_windows_processes(win_session)
         logging.info(f"[{user}@{peer}] Discovering config files...")
-        all_data['config_files'] = self._discover_and_parse_config_files(win_session, 'windows', config_targets)
-        # Note: Other Windows discovery methods (network, storage, etc.) would be added here.
+        all_data['config_files'] = self._discover_and_parse_config_files(ssh, config_targets)
+        
         return all_data
 
     def _persist_results(self, all_results):

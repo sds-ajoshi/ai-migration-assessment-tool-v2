@@ -21,9 +21,9 @@ class DBManager:
         self.conn = None
         try:
             self.conn = sqlite3.connect(db_file, check_same_thread=False)
-            # Enforce foreign key constraints for data integrity
             self.conn.execute("PRAGMA foreign_keys = ON;")
             logging.info(f"Successfully connected to database: {db_file}")
+            self._create_tables()
         except sqlite3.Error as e:
             logging.error(f"Error connecting to database: {e}")
 
@@ -33,7 +33,7 @@ class DBManager:
             self.conn.close()
             logging.info("Database connection closed.")
 
-    def create_tables(self):
+    def _create_tables(self):
         """
         Creates all necessary tables with a complete schema that includes
         all data types and foreign key constraints.
@@ -41,21 +41,8 @@ class DBManager:
         if not self.conn:
             return
 
-        # ON DELETE CASCADE ensures that when a server record's snapshot data is cleared,
-        # all its dependent records in other tables are automatically removed.
         create_table_queries = [
-            """
-            CREATE TABLE IF NOT EXISTS servers (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                hostname TEXT,
-                ip_address TEXT NOT NULL UNIQUE,
-                os_name TEXT,
-                os_version TEXT,
-                cpu_cores INTEGER,
-                total_memory_gb REAL,
-                last_discovered_timestamp DATETIME NOT NULL
-            );
-            """,
+            "CREATE TABLE IF NOT EXISTS servers (id INTEGER PRIMARY KEY AUTOINCREMENT, hostname TEXT, ip_address TEXT NOT NULL UNIQUE, os_name TEXT, os_version TEXT, cpu_cores INTEGER, total_memory_gb REAL, last_discovered_timestamp DATETIME NOT NULL);",
             """
             CREATE TABLE IF NOT EXISTS applications (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -65,116 +52,21 @@ class DBManager:
                 user TEXT,
                 state TEXT,
                 command_line TEXT,
-                listening_ports TEXT, -- For storing JSON array of listening ports
+                listening_ports TEXT,
+                owning_package TEXT, -- Added owning_package
                 FOREIGN KEY (server_id) REFERENCES servers (id) ON DELETE CASCADE
             );
             """,
-            """
-            CREATE TABLE IF NOT EXISTS network_connections (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                server_id INTEGER NOT NULL,
-                destination_ip TEXT,
-                destination_port INTEGER,
-                state TEXT,
-                process_name TEXT,
-                source_pid INTEGER,
-                FOREIGN KEY (server_id) REFERENCES servers (id) ON DELETE CASCADE
-            );
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS installed_software (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                server_id INTEGER NOT NULL,
-                name TEXT,
-                version TEXT,
-                vendor TEXT,
-                file_list TEXT, -- JSON list of files
-                FOREIGN KEY (server_id) REFERENCES servers (id) ON DELETE CASCADE
-            );
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS storage_mounts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                server_id INTEGER NOT NULL,
-                source TEXT,
-                mount_point TEXT,
-                filesystem_type TEXT,
-                storage_type TEXT, -- DAS, NAS, SAN
-                total_gb REAL,
-                used_gb REAL,
-                FOREIGN KEY (server_id) REFERENCES servers (id) ON DELETE CASCADE
-            );
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS config_files (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                server_id INTEGER NOT NULL,
-                file_path TEXT NOT NULL,
-                content TEXT,
-                FOREIGN KEY (server_id) REFERENCES servers (id) ON DELETE CASCADE
-            );
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS extracted_config_pairs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                server_id INTEGER NOT NULL,
-                file_path TEXT NOT NULL,
-                key TEXT NOT NULL,
-                value TEXT,
-                FOREIGN KEY (server_id) REFERENCES servers (id) ON DELETE CASCADE
-            );
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS scheduled_tasks (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                server_id INTEGER NOT NULL,
-                name TEXT,
-                command TEXT,
-                schedule TEXT,
-                enabled BOOLEAN,
-                FOREIGN KEY (server_id) REFERENCES servers (id) ON DELETE CASCADE
-            );
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS process_open_files (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                server_id INTEGER NOT NULL,
-                pid INTEGER NOT NULL,
-                file_path TEXT NOT NULL,
-                FOREIGN KEY (server_id) REFERENCES servers (id) ON DELETE CASCADE
-            );
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS ipc_connections (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                server_id INTEGER NOT NULL,
-                source_pid INTEGER,
-                dest_pid INTEGER,
-                path TEXT,
-                FOREIGN KEY (server_id) REFERENCES servers (id) ON DELETE CASCADE
-            );
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS user_context (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                server_id INTEGER NOT NULL,
-                username TEXT,
-                has_password BOOLEAN,
-                shell TEXT,
-                sudo_privileges TEXT,
-                FOREIGN KEY (server_id) REFERENCES servers (id) ON DELETE CASCADE
-            );
-            """,
-             """
-            CREATE TABLE IF NOT EXISTS performance_metrics (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                server_id INTEGER NOT NULL,
-                metric_name TEXT,
-                metric_value REAL,
-                timestamp DATETIME,
-                FOREIGN KEY (server_id) REFERENCES servers (id) ON DELETE CASCADE
-            );
-            """
+            "CREATE TABLE IF NOT EXISTS network_connections (id INTEGER PRIMARY KEY AUTOINCREMENT, server_id INTEGER NOT NULL, destination_ip TEXT, destination_port INTEGER, state TEXT, process_name TEXT, source_pid INTEGER, FOREIGN KEY (server_id) REFERENCES servers (id) ON DELETE CASCADE);",
+            "CREATE TABLE IF NOT EXISTS installed_software (id INTEGER PRIMARY KEY AUTOINCREMENT, server_id INTEGER NOT NULL, name TEXT, version TEXT, vendor TEXT, FOREIGN KEY (server_id) REFERENCES servers (id) ON DELETE CASCADE);",
+            "CREATE TABLE IF NOT EXISTS storage_mounts (id INTEGER PRIMARY KEY AUTOINCREMENT, server_id INTEGER NOT NULL, source TEXT, mount_point TEXT, filesystem_type TEXT, storage_type TEXT, total_gb REAL, used_gb REAL, FOREIGN KEY (server_id) REFERENCES servers (id) ON DELETE CASCADE);",
+            "CREATE TABLE IF NOT EXISTS config_files (id INTEGER PRIMARY KEY AUTOINCREMENT, server_id INTEGER NOT NULL, file_path TEXT NOT NULL, content TEXT, FOREIGN KEY (server_id) REFERENCES servers (id) ON DELETE CASCADE);",
+            "CREATE TABLE IF NOT EXISTS extracted_config_pairs (id INTEGER PRIMARY KEY AUTOINCREMENT, server_id INTEGER NOT NULL, file_path TEXT NOT NULL, key TEXT NOT NULL, value TEXT, FOREIGN KEY (server_id) REFERENCES servers (id) ON DELETE CASCADE);",
+            "CREATE TABLE IF NOT EXISTS scheduled_tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, server_id INTEGER NOT NULL, name TEXT, command TEXT, schedule TEXT, enabled BOOLEAN, FOREIGN KEY (server_id) REFERENCES servers (id) ON DELETE CASCADE);",
+            "CREATE TABLE IF NOT EXISTS process_open_files (id INTEGER PRIMARY KEY AUTOINCREMENT, server_id INTEGER NOT NULL, pid INTEGER NOT NULL, file_path TEXT NOT NULL, FOREIGN KEY (server_id) REFERENCES servers (id) ON DELETE CASCADE);",
+            "CREATE TABLE IF NOT EXISTS ipc_connections (id INTEGER PRIMARY KEY AUTOINCREMENT, server_id INTEGER NOT NULL, source_pid INTEGER, dest_pid INTEGER, path TEXT, FOREIGN KEY (server_id) REFERENCES servers (id) ON DELETE CASCADE);",
+            "CREATE TABLE IF NOT EXISTS user_context (id INTEGER PRIMARY KEY AUTOINCREMENT, server_id INTEGER NOT NULL, username TEXT, has_password BOOLEAN, shell TEXT, sudo_privileges TEXT, FOREIGN KEY (server_id) REFERENCES servers (id) ON DELETE CASCADE);",
+            "CREATE TABLE IF NOT EXISTS performance_metrics (id INTEGER PRIMARY KEY AUTOINCREMENT, server_id INTEGER NOT NULL, metric_name TEXT, metric_value REAL, timestamp DATETIME, FOREIGN KEY (server_id) REFERENCES servers (id) ON DELETE CASCADE);"
         ]
         try:
             cursor = self.conn.cursor()
@@ -185,7 +77,6 @@ class DBManager:
         except sqlite3.Error as e:
             logging.error(f"Error creating tables: {e}")
 
-    # --- Bulk Insert Methods ---
     def _bulk_insert(self, query, data):
         """Generic helper for bulk insert operations."""
         if not self.conn or not data:
@@ -208,6 +99,7 @@ class DBManager:
             logging.error(f"Bulk insert failed for servers: {e}")
 
     def add_applications_bulk(self, data):
+        # FIXED: Added 'owning_package' to the INSERT statement
         query = "INSERT INTO applications (server_id, process_name, pid, user, state, command_line, listening_ports, owning_package) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
         self._bulk_insert(query, data)
 
@@ -216,7 +108,7 @@ class DBManager:
         self._bulk_insert(query, data)
 
     def add_installed_software_bulk(self, data):
-        query = "INSERT INTO installed_software (server_id, name, version, vendor, file_list) VALUES (?, ?, ?, ?, ?)"
+        query = "INSERT INTO installed_software (server_id, name, version, vendor) VALUES (?, ?, ?, ?)"
         self._bulk_insert(query, data)
 
     def add_storage_mounts_bulk(self, data):
@@ -251,7 +143,6 @@ class DBManager:
         query = "INSERT INTO performance_metrics (server_id, metric_name, metric_value, timestamp) VALUES (?, ?, ?, ?)"
         self._bulk_insert(query, data)
 
-    # --- Data Retrieval Methods ---
     def get_server_ips_to_ids(self):
         if not self.conn: return {}
         try:
