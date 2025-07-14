@@ -57,7 +57,21 @@ class DBManager:
                 FOREIGN KEY (server_id) REFERENCES servers (id) ON DELETE CASCADE
             );
             """,
-            "CREATE TABLE IF NOT EXISTS network_connections (id INTEGER PRIMARY KEY AUTOINCREMENT, server_id INTEGER NOT NULL, destination_ip TEXT, destination_port INTEGER, state TEXT, process_name TEXT, source_pid INTEGER, FOREIGN KEY (server_id) REFERENCES servers (id) ON DELETE CASCADE);",
+            """
+            CREATE TABLE IF NOT EXISTS network_connections (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                server_id INTEGER NOT NULL,
+                protocol TEXT,
+                state TEXT,
+                local_address TEXT,
+                local_port INTEGER,
+                peer_address TEXT,
+                peer_port INTEGER,
+                process_name TEXT,
+                pid INTEGER,
+                FOREIGN KEY (server_id) REFERENCES servers (id) ON DELETE CASCADE
+            );
+            """,
             "CREATE TABLE IF NOT EXISTS installed_software (id INTEGER PRIMARY KEY AUTOINCREMENT, server_id INTEGER NOT NULL, name TEXT, version TEXT, vendor TEXT, FOREIGN KEY (server_id) REFERENCES servers (id) ON DELETE CASCADE);",
             "CREATE TABLE IF NOT EXISTS storage_mounts (id INTEGER PRIMARY KEY AUTOINCREMENT, server_id INTEGER NOT NULL, source TEXT, mount_point TEXT, filesystem_type TEXT, storage_type TEXT, total_gb REAL, used_gb REAL, FOREIGN KEY (server_id) REFERENCES servers (id) ON DELETE CASCADE);",
             "CREATE TABLE IF NOT EXISTS config_files (id INTEGER PRIMARY KEY AUTOINCREMENT, server_id INTEGER NOT NULL, file_path TEXT NOT NULL, content TEXT, FOREIGN KEY (server_id) REFERENCES servers (id) ON DELETE CASCADE);",
@@ -104,7 +118,7 @@ class DBManager:
         self._bulk_insert(query, data)
 
     def add_network_connections_bulk(self, data):
-        query = "INSERT INTO network_connections (server_id, destination_ip, destination_port, state, process_name, source_pid) VALUES (?, ?, ?, ?, ?, ?)"
+        query = "INSERT INTO network_connections (server_id, protocol, state, local_address, local_port, peer_address, peer_port, process_name, pid) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
         self._bulk_insert(query, data)
 
     def add_installed_software_bulk(self, data):
@@ -225,3 +239,10 @@ class DBManager:
         cursor.execute("SELECT ip_address FROM servers WHERE id = ?", (server_id,))
         row = cursor.fetchone()
         return row[0] if row else None
+    
+    def get_all_scheduled_tasks(self):
+        if not self.conn: return []
+        cursor = self.conn.cursor()
+        cursor.row_factory = sqlite3.Row
+        cursor.execute("SELECT * FROM scheduled_tasks")
+        return [dict(row) for row in cursor.fetchall()]

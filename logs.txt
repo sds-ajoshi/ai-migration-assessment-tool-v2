@@ -1,5 +1,0 @@
-                                                                                                                                                                                                                                      
- Usage: main.py [OPTIONS] COMMAND [ARGS]...                                                                                                                                                                                           
-                                                                                                                                                                                                                                      
- An AI-Powered Migration Assessment Tool that discovers your IT landscape, builds a Digital Twin, and provides intelligent migration recommendations.                                                                                 
-                                                                                                                                                                                                                                      

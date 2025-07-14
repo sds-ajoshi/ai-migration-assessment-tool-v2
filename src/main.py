@@ -117,7 +117,7 @@ def profile(
                     user=neo4j_config.get('user'),
                     password=neo4j_config.get('password')
                 )
-                neo4j_manager.export_graph(profiling_agent.graph)
+                neo4j_manager.export_graph(db_manager)
                 neo4j_manager.close()
                 console.print("[green]Successfully exported graph to Neo4j.[/green]")
             except Exception as e:

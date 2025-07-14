@@ -232,30 +232,47 @@ class DataIngestionAgent:
         return processes
 
     def _discover_linux_network(self, ssh):
+        connections = []
         try:
-            command = "ss -tnp"
+            # Use `ss -tulpn` to get TCP, UDP, Listening, Process info, and Numeric ports
+            command = "ss -tulpn"
             output = self._execute_linux_command(ssh, command)
             if not output: return []
-            connections = []
-            line_regex = re.compile(r'(\S+)\s+\S+\s+\S+\s+\S+\s+([\d\.:\*]+)\s+.*users:\(\("([^"]+)",pid=(\d+),.*\)\)')
-            for line in output.strip().splitlines()[1:]:
-                match = line_regex.search(line)
-                if match:
-                    try:
-                        state, peer_addr_port, process_name, pid = match.groups()
-                        dest_ip, dest_port = peer_addr_port.rsplit(':', 1)
-                        connections.append({
-                            'destination_ip': dest_ip, 
-                            'destination_port': int(dest_port), 
-                            'state': state, 
-                            'process_name': process_name, 
-                            'source_pid': int(pid)
-                        })
-                    except (ValueError, IndexError) as e:
-                        logging.warning(f"Could not parse network connection line: '{line}'. Error: {e}")
-                        continue
+
+            for line in output.strip().splitlines()[1:]: # Skip header
+                parts = line.split()
+                if len(parts) < 5: continue
+
+                try:
+                    protocol, state, local_full, peer_full = parts[0], parts[1], parts[4], parts[5]
+                    
+                    # Parse process info (it's the last field)
+                    proc_info_match = re.search(r'users:\(\("([^"]+)",pid=(\d+),.*\)\)', line)
+                    process_name, pid = (proc_info_match.groups() if proc_info_match else (None, None))
+
+                    # Parse local address and port
+                    local_addr, local_port = local_full.rsplit(':', 1)
+                    
+                    # Parse peer address and port
+                    peer_addr, peer_port = (peer_full.rsplit(':', 1) if ':' in peer_full else (peer_full, None))
+
+                    connections.append({
+                        'protocol': protocol,
+                        'state': state,
+                        'local_address': local_addr,
+                        'local_port': int(local_port),
+                        'peer_address': peer_addr,
+                        'peer_port': int(peer_port) if peer_port and peer_port != '*' else None,
+                        'process_name': process_name,
+                        'pid': int(pid) if pid else None
+                    })
+                except (ValueError, IndexError) as e:
+                    logging.warning(f"Could not parse network connection line: '{line}'. Error: {e}")
+                    continue
             return connections
-        except Exception as e: logging.error(f"Failed to discover Linux network connections: {e}"); return []
+        except Exception as e: 
+            logging.error(f"Failed to discover Linux network connections: {e}")
+            return []
 
     def _discover_linux_software(self, ssh, process_executables):
         software_list = []
@@ -476,7 +493,7 @@ class DataIngestionAgent:
                 data = res.get('data', {})
                 
                 if data.get('running_processes'): self.db_manager.add_applications_bulk([(server_id, p.get('process_name'), p.get('pid'), p.get('user'), p.get('state'), p.get('command_line'), json.dumps(p.get('listening_ports', [])), p.get('owning_package')) for p in data.get('running_processes', [])])
-                if data.get('network_connections'): self.db_manager.add_network_connections_bulk([(server_id, c['destination_ip'], c['destination_port'], c['state'], c['process_name'], c['source_pid']) for c in data.get('network_connections', [])])
+                if data.get('network_connections'): self.db_manager.add_network_connections_bulk([(server_id, c['protocol'], c['state'], c['local_address'], c['local_port'], c['peer_address'], c['peer_port'], c['process_name'], c['pid']) for c in data.get('network_connections', [])])
                 if data.get('installed_software'): self.db_manager.add_installed_software_bulk([(server_id, s.get('name'), s.get('version'), s.get('vendor')) for s in data.get('installed_software', [])])
                 if data.get('storage_mounts'): self.db_manager.add_storage_mounts_bulk([(server_id, m.get('source'), m.get('mount_point'), m.get('filesystem_type'), m.get('storage_type'), m.get('total_gb'), m.get('used_gb')) for m in data.get('storage_mounts', [])])
                 if data.get('scheduled_tasks'): self.db_manager.add_scheduled_tasks_bulk([(server_id, t.get('name'), t.get('command'), t.get('schedule'), t.get('enabled')) for t in data.get('scheduled_tasks', [])])
