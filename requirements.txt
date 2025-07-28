@@ -6,18 +6,19 @@ rich==13.7.1
 pandas==2.2.2
 
 # Remote Execution
-paramiko==3.4.0
+paramiko==3.5.0
 pywinrm==0.4.1
 
 # Security & Secrets Management
 keyring==25.2.1
-keyrings.alt==5.0.0 
+keyrings.alt==5.0.0
+hvac==2.3.0  # For Vault
 
+# Build Tools
 setuptools<70
 
 # Graph Analysis
 networkx==3.3
-python-louvain==0.16
 
 # Graph Database Driver
 neo4j==5.20.0
@@ -25,5 +26,16 @@ neo4j==5.20.0
 # YAML Handling
 PyYAML==6.0.1
 
-# NMAP Scanning
-python-nmap==0.7.1
+# Environment Vars
+python-dotenv==1.0.1
+
+# Logging
+structlog==25.1.0
+
+# Retries
+tenacity==9.0.0
+
+# Database Drivers
+psycopg2==2.9.10
+pymysql==1.1.1
+cx_Oracle==8.3.0

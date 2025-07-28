@@ -1,130 +1,79 @@
 # src/main.py
 
+import sys
+from pathlib import Path
+sys.path.append(str(Path(__file__).parent.parent))
 import typer
-import yaml
 from rich.console import Console
 from rich.panel import Panel
-from rich.rule import Rule
-from pathlib import Path
-import logging
+from src.orchestrator.pipeline import PipelineOrchestrator
+from src.config.loader import ConfigLoader
+from src.logging.logger import setup_logging
 
-from agents.agent_data_ingestion import DataIngestionAgent
-from agents.agent_profiling import ProfilingAgent
-from db.db_manager import DBManager
-from db.neo4j_manager import Neo4jManager
-
-# Suppress noisy logs from third-party libraries
-logging.getLogger("paramiko").setLevel(logging.WARNING)
-logging.getLogger("winrm").setLevel(logging.WARNING)
-
+app = typer.Typer()
 console = Console()
 
-app = typer.Typer(
-    name="ai-migration-assessment-tool",
-    help="""
-    An AI-Powered Migration Assessment Tool that discovers your IT landscape,
-    builds a Digital Twin, and provides intelligent migration recommendations.
-    """,
-    no_args_is_help=True,
-    rich_markup_mode="rich"
-)
-
-# A helper function to load the knowledge base
-def _load_knowledge_base():
-    try:
-        with open("knowledge_base.yaml", 'r') as f:
-            return yaml.safe_load(f)
-    except (FileNotFoundError, yaml.YAMLError):
-        return {}
-
-@app.command(
-    name="ingest",
-    help="""
-    [bold green]Phase 1:[/bold green] Ingests data from servers listed in the inventory file.
-    Connects to hosts, gathers system information, and persists it to a local SQLite database.
-    """
-)
+@app.command()
 def ingest(
-    inventory_file: Path = typer.Option("inventory.csv", "--inventory-file", "-i", help="Path to the inventory CSV file."),
-    workers: int = typer.Option(10, "--workers", "-w", help="Number of concurrent workers for discovery."),
-    db_file: str = typer.Option("assessment_history.db", "--db-file", help="Path to the SQLite database file.")
+    input_inventory_file: str = typer.Option("inventory.csv", help="Path to CSV file containing host inventory"),
+    output_db: str = typer.Option("data/assessment_history.db", help="Path to SQLite database file"),
+    max_workers: int = typer.Option(10, help="Number of concurrent workers for data ingestion"),
+    dry_run: bool = typer.Option(False, help="Run without making changes to database or Neo4j"),
+    verbose: bool = typer.Option(False, help="Enable verbose logging")
 ):
-    console.print(Panel("Phase 1: Starting Data Ingestion", title="[bold cyan]AI-Powered Migration Assessment Tool[/bold cyan]", expand=False))
-    console.log(f"Using database file: {db_file}")
+    """Run the ingestion phase only."""
+    setup_logging(verbose=verbose)
+    config = ConfigLoader().load()
+    orchestrator = PipelineOrchestrator(config, output_db, input_inventory_file, dry_run, max_workers)
+    orchestrator.run_ingestion()
+    console.print(Panel("Ingestion complete.", title="[bold green]Success[/bold green]"))
 
-    if not inventory_file.exists():
-        console.print(f"[bold red]Error: Inventory file not found at '{inventory_file}'.[/bold red]")
-        raise typer.Exit(code=1)
-
-    db_manager = DBManager(db_file)
-    ingestion_agent = DataIngestionAgent(inventory_path=inventory_file, db_manager=db_manager, max_workers=workers)
-    
-    ingestion_agent.run_discovery()
-    
-    console.log("Data ingestion complete.")
-    db_manager.close()
-
-@app.command(
-    name="profile",
-    help="""
-    [bold green]Phase 2:[/bold green] Analyzes collected data to build the Digital Twin and find application clusters.
-    """
-)
-def profile(
-    db_file: str = typer.Option("assessment_history.db", "--db-file", help="Path to the SQLite database file."),
-    export_to_neo4j: bool = typer.Option(False, "--export-to-neo4j", help="Export the final dependency graph to Neo4j."),
-    fingerprint_services: bool = typer.Option(False, "--fingerprint-services", help="Attempt to fingerprint external services using nmap (requires nmap to be installed).")
+@app.command()
+def correlate(
+    output_db: str = typer.Option("data/assessment_history.db", help="Path to SQLite database file"),
+    dry_run: bool = typer.Option(False, help="Run without making changes to database or Neo4j"),
+    verbose: bool = typer.Option(False, help="Enable verbose logging")
 ):
-    console.rule("[bold cyan]Phase 2: Analysis and Digital Twin Construction[/bold cyan]")
-    db_manager = DBManager(db_file)
-    
-    # *** THIS IS THE FINAL FIX ***
-    # This block correctly calls the new, refactored methods on the ProfilingAgent
-    
-    # 1. Initialize the agent, which builds the base graph of servers and processes
-    profiling_agent = ProfilingAgent(db_manager)
-    console.log(f"Base dependency graph built successfully with {profiling_agent.graph.number_of_nodes()} nodes and {profiling_agent.graph.number_of_edges()} edges.")
-    
-    # 2. Enrich the graph with correlations (software, files, storage)
-    console.log("Correlating and enriching graph to create Digital Twin...")
-    profiling_agent.enrich_and_correlate()
-    console.log("Digital Twin enrichment complete.")
+    """Run the correlation phase only."""
+    setup_logging(verbose=verbose)
+    config = ConfigLoader().load()
+    orchestrator = PipelineOrchestrator(config, output_db, dry_run=dry_run)
+    orchestrator.run_correlation()
+    console.print(Panel("Correlation complete.", title="[bold green]Success[/bold green]"))
 
-    # 3. Find and report application clusters from the enriched graph
-    console.log("Finding application clusters from enriched graph...")
-    profiling_agent.find_and_report_clusters()
+@app.command()
+def export(
+    output_db: str = typer.Option("data/assessment_history.db", help="Path to SQLite database file"),
+    export_graph: str = typer.Option(None, help="Export correlation graph to specified .graphml file"),
+    dry_run: bool = typer.Option(False, help="Run without making changes to database or Neo4j"),
+    verbose: bool = typer.Option(False, help="Enable verbose logging")
+):
+    """Run the export phase only."""
+    setup_logging(verbose=verbose)
+    config = ConfigLoader().load()
+    orchestrator = PipelineOrchestrator(config, output_db, dry_run=dry_run)
+    orchestrator.run_export(export_graph)
+    console.print(Panel("Export complete.", title="[bold green]Success[/bold green]"))
 
-    # 4. Identify and report external dependencies
-    if fingerprint_services:
-        console.log("Identifying and fingerprinting external dependencies...")
-        profiling_agent.identify_external_dependencies()
-    
-    # 5. Optionally, export the final graph to Neo4j
-    if export_to_neo4j:
-        console.rule("[bold blue]Exporting to Neo4j[/bold blue]")
-        knowledge_base = _load_knowledge_base()
-        neo4j_config = knowledge_base.get('neo4j')
-        
-        # *** THIS IS THE FIX ***
-        # Check if the Neo4j configuration exists before trying to connect.
-        if not neo4j_config:
-            console.print("[bold red]Error: 'neo4j' configuration not found in knowledge_base.yaml.[/bold red]")
-        else:
-            try:
-                # Pass the credentials to the Neo4jManager
-                neo4j_manager = Neo4jManager(
-                    uri=neo4j_config.get('uri'),
-                    user=neo4j_config.get('user'),
-                    password=neo4j_config.get('password')
-                )
-                neo4j_manager.export_graph(db_manager)
-                neo4j_manager.close()
-                console.print("[green]Successfully exported graph to Neo4j.[/green]")
-            except Exception as e:
-                console.print(f"[bold red]Failed to export to Neo4j: {e}[/bold red]")
-                console.print("Please ensure Neo4j is running and credentials in 'knowledge_base.yaml' are correct.")
-
-    db_manager.close()
+@app.command()
+def full_pipeline(
+    input_inventory_file: str = typer.Option("inventory.csv", help="Path to CSV file containing host inventory"),
+    output_db: str = typer.Option("data/assessment_history.db", help="Path to SQLite database file"),
+    config: str = typer.Option("knowledge_base.yaml", help="Path to configuration YAML file"),
+    dry_run: bool = typer.Option(False, help="Run without making changes to database or Neo4j"),
+    debug: bool = typer.Option(False, help="Enable debug logging"),
+    max_workers: int = typer.Option(10, help="Number of concurrent workers for data ingestion"),
+    export_graph: str = typer.Option(None, help="Export correlation graph to specified .graphml file"),
+    verbose: bool = typer.Option(False, help="Enable verbose logging"),
+    summary: bool = typer.Option(False, help="Output a summary table after ingestion")
+):
+    """Run the full pipeline: ingest, correlate, export."""
+    setup_logging(verbose=verbose or debug)
+    config_loader = ConfigLoader(config_path=config)
+    config = config_loader.load()
+    orchestrator = PipelineOrchestrator(config, output_db, input_inventory_file, dry_run, max_workers)
+    orchestrator.run_full_pipeline(export_graph, summary)
+    console.print(Panel("Full pipeline complete.", title="[bold green]Success[/bold green]"))
 
 if __name__ == "__main__":
     app()

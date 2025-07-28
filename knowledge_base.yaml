@@ -1,55 +1,116 @@
 # Knowledge Base for the AI-Powered Migration Assessment Tool
-# Version: 2.1
+# Version: 2.2
+
+# --- Neo4j Configuration ---
+# Credentials and settings for Neo4j graph export. Sensitive values loaded from environment variables.
+neo4j:
+  uri: bolt://localhost:7687
+  user: neo4j
+  password: ${NEO4J_PASSWORD}  # Loaded from environment variable at runtime (e.g., via os.getenv or .env)
 
 # --- Configuration File Discovery Targets ---
+# Structured list of config files to discover and parse, organized by OS/platform.
+# Each entry includes paths (OS-specific) and parsers (regex rules for key extraction).
 config_files:
-  - name: "httpd.conf"
-    paths: ["/etc/httpd", "/etc/apache2"]
-    parsers:
-      - key: "ListenPort"
-        regex: "^Listen\\s+(\\d+)"
-      - key: "ServerAdmin"
-        regex: "^ServerAdmin\\s+(.+)"
-  
-  - name: "nginx.conf"
-    paths: ["/etc/nginx"]
-    parsers:
-      - key: "WorkerProcesses"
-        regex: "worker_processes\\s+(\\d+);"
-
-  - name: "my.cnf"
-    paths: ["/etc/mysql", "/etc"]
-    parsers:
-      - key: "Port"
-        regex: "^port\\s*=\\s*(\\d+)"
-        section: "mysqld"
-
-  - name: "web.config"
-    paths: ["C:\\inetpub\\wwwroot"]
-
-# --- Performance Counters Configuration ---
-performance_counters:
+  linux:
+    - path: "/etc/httpd/httpd.conf"
+      type: "apache"
+      parser: "regex"
+    - path: "/etc/apache2/apache2.conf"
+      type: "apache"
+      parser: "regex"
+    - path: "/etc/nginx/nginx.conf"
+      type: "nginx"
+      parser: "regex"
+    - path: "/etc/mysql/my.cnf"
+      type: "mysql"
+      parser: "regex"
+    - path: "/etc/postgresql/14/main/postgresql.conf"
+      type: "postgresql"
+      parser: "regex"
+    - path: "/etc/ssh/sshd_config"
+      type: "ssh"
+      parser: "regex"
   windows:
-    # CPU
-    - "\\Processor Information(_Total)\\% Processor Time"
-    - "\\Processor Information(_Total)\\% User Time"
-    - "\\Processor Information(_Total)\\% Privileged Time"
-    # Memory
-    - "\\Memory\\Available MBytes"
-    - "\\Memory\\Pages/sec"
-    - "\\Paging File(_Total)\\% Usage"
-    # Disk I/O
-    - "\\LogicalDisk(*)\\Disk Reads/sec"
-    - "\\LogicalDisk(*)\\Disk Writes/sec"
-    - "\\LogicalDisk(*)\\Disk Read Bytes/sec"
-    - "\\LogicalDisk(*)\\Disk Write Bytes/sec"
-    - "\\LogicalDisk(*)\\Avg. Disk sec/Read"
-    - "\\LogicalDisk(*)\\Avg. Disk sec/Write"
-    # Network I/O
-    - "\\Network Interface(*)\\Bytes Received/sec"
-    - "\\Network Interface(*)\\Bytes Sent/sec"
+    - path: "C:\\Apache24\\conf\\httpd.conf"
+      type: "apache"
+      parser: "regex"
+    - path: "C:\\nginx\\conf\\nginx.conf"
+      type: "nginx"
+      parser: "regex"
+    - path: "C:\\Program Files\\MySQL\\my.ini"
+      type: "mysql"
+      parser: "regex"
+    - path: "C:\\inetpub\\wwwroot\\web.config"
+      type: "iis"
+      parser: "xml"  # Example extension for different parser types
 
-neo4j:
-  uri: "bolt://localhost:7687"
-  user: "neo4j"
-  password: "password123"
+# --- Database Targets ---
+# Configuration for discovering and ingesting from structured data sources (e.g., RDBMS).
+# Includes connection defaults, required Python packages, and discovery methods.
+databases:
+  postgresql:
+    default_port: 5432
+    config_path: "/etc/postgresql/14/main/"
+    discovery_method: "psycopg2"
+    required_packages: ["psycopg2"]
+    schemas_to_scan: ["public", "information_schema"]
+  mysql:
+    default_port: 3306
+    config_path: "/etc/mysql/"
+    discovery_method: "pymysql"  # or "mysql-connector-python"
+    required_packages: ["pymysql"]
+    schemas_to_scan: ["information_schema", "performance_schema"]
+  oracle:
+    default_port: 1521
+    config_path: "/opt/oracle/"
+    discovery_method: "cx_Oracle"
+    required_packages: ["cx_Oracle"]
+    schemas_to_scan: ["SYS", "SYSTEM"]
+
+# --- Discovery Rules ---
+# Semantic rules for interpreting parsed config values or discovered metadata.
+# Includes patterns (regex), expected type, and semantic tag (e.g., for graph enrichment).
+discovery_rules:
+  postgres.port:
+    pattern: "port\\s*=\\s*(\\d+)"
+    type: "int"
+    semantic: "port"
+  mysql.bind-address:
+    pattern: "bind-address\\s*=\\s*([\\d.]+)"
+    type: "ip"
+    semantic: "host"
+  apache.ListenPort:
+    pattern: "^Listen\\s+(\\d+)"
+    type: "int"
+    semantic: "service_port"
+  nginx.WorkerProcesses:
+    pattern: "worker_processes\\s+(\\d+);"
+    type: "int"
+    semantic: "concurrency"
+  ssh.SSH_PORT:
+    pattern: "^Port (\\d+)"
+    type: "int"
+    semantic: "port"
+
+# --- Relationship Patterns (Optional) ---
+# Declarative patterns for enriching the graph during correlation.
+# Used to define expected node connections (source → target via rel_type).
+relationship_patterns:
+  - source: "Database"
+    target: "Server"
+    type: "RUNS_ON"
+    condition: "host_ip_match"  # Example: custom condition like IP matching
+  - source: "Schema"
+    target: "Database"
+    type: "HAS_SCHEMA"
+  - source: "Table"
+    target: "Schema"
+    type: "HAS_TABLE"
+  - source: "User"
+    target: "Table"
+    type: "OWNS"
+  - source: "Application"
+    target: "Database"
+    type: "CONNECTS_TO"
+    condition: "port_match"  # Example: if app listens on DB port
